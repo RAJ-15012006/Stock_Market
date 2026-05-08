@@ -1,0 +1,15 @@
+phidata
+groq
+yfinance
+duckduckgo-search
+python-dotenv
+streamlit
+plotly
+pandas
+sqlalchemy
+phi[sql]
+pyMuPDF
+lancedb
+google-generativeai
+sentence-transformers
+fastembed
