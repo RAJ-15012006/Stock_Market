@@ -1,77 +1,75 @@
-# 🚀 Agentic 3D Financial Intelligence Dashboard
+# 🤖 Agentic AI Financial Intelligence Platform
 
-An advanced, job-ready AI platform that leverages **Multi-Agent Orchestration**, **3D Visualizations**, and **Voice Interactivity** to provide real-time financial insights and sentiment analysis.
+A full-featured AI-powered stock market dashboard with multi-agent analysis, real-time data, Indian + US markets, and autonomous trading simulation.
 
-![Demo Mockup](path/to/mockup.png)
+## 🌟 Features
 
-## 🌟 Key Features
+| Tab | What it does |
+|-----|-------------|
+| 🤖 AI Chat | Ask anything — agents answer with live data |
+| 🕯️ Candle Trading | 8 chart types · RSI · MACD · BB · Buy/Sell signals |
+| 🌐 Market Data | Forex · Commodities · Crypto · Global Indices · Sectors · 52W tracker |
+| 💼 Portfolio | P&L · Pie chart · Risk meter · CSV export |
+| 🔍 AI Screener | Scan Indian + US stocks for RSI/volume signals |
+| ⚔️ Agent Debate | Bull vs Bear vs Judge — 3-agent stock debate |
+| 📊 Auto Trading | RSI-based autonomous rebalancing |
+| ⏰ Morning Brief | AI-generated daily market brief saved to DB |
 
-- **Multi-Agent System**: Built with **Phidata**, featuring specialized agents for Financial Data, Web Search, and Sentiment Analysis.
-- **3D Interactive UI**: A high-performance frontend built with **React Three Fiber** and **Tailwind CSS**, featuring a holographic market globe.
-- **Voice Intelligence**: Integrated Web Speech API for bi-directional Voice-to-Text and Text-to-Speech interactions.
-- **Persistent Memory**: SQLite-backed session management allowing agents to recall past interactions.
-- **Decoupled Architecture**: Scalable **FastAPI** backend and **Vite/React** frontend.
-- **Real-time Data**: Live stock metrics and news fetching via **YFinance** and **DuckDuckGo**.
+## 🇮🇳 Indian Stocks Supported
+RELIANCE, TCS, INFY, HDFCBANK, WIPRO, ICICIBANK, BAJFINANCE, ADANIENT, SBIN, TATAMOTORS, HINDUNILVR, MARUTI, SUNPHARMA, ONGC, AXISBANK
 
 ## 🛠️ Tech Stack
+- **AI**: Agno framework · Groq (Llama 3.1) · Gemini 2.0 Flash fallback
+- **Data**: YFinance · DuckDuckGo Search
+- **UI**: Streamlit · Plotly · Three.js globe
+- **Storage**: SQLite (sessions + portfolio + briefs)
 
-- **Backend**: Python, FastAPI, Phidata, Groq (Llama 3.3), SQLAlchemy.
-- **Frontend**: React, Three.js, React Three Fiber, Framer Motion, Tailwind CSS.
-- **DevOps**: Docker, Docker Compose.
-- **Data**: YFinance, DuckDuckGo Search.
+## 🚀 Run Locally
 
-## 🏗️ Architecture
+```bash
+# 1. Clone
+git clone <your-repo-url>
+cd agentic_ai_stock
 
-```mermaid
-graph TD
-    User[User] -->|Voice/Text| Frontend[React 3D UI]
-    Frontend -->|REST API| Backend[FastAPI Server]
-    Backend -->|Orchestration| Manager[Agent Team Manager]
-    Manager --> Agent1[Finance Agent]
-    Manager --> Agent2[Web Search Agent]
-    Manager --> Agent3[Sentiment Agent]
-    Agent1 --> Tools[YFinance Tool]
-    Agent2 --> Tools2[DuckDuckGo Tool]
-    Manager --> Storage[SQLite Memory]
+# 2. Install
+pip install -r requirements.txt
+
+# 3. Add API keys
+cp .env.example .env
+# Edit .env → add GROQ_API_KEY and GOOGLE_API_KEY
+
+# 4. Run
+python -m streamlit run unified_app.py
 ```
 
-## 🚀 Getting Started
+Open → http://localhost:8501
 
-### Prerequisites
-- Python 3.9+
-- Node.js 18+
-- Groq API Key
+## 🐳 Docker
 
-### Installation
-
-1. **Clone the repo:**
-   ```bash
-   git clone https://github.com/yourusername/agentic-finance-3d.git
-   cd agentic-finance-3d
-   ```
-
-2. **Setup Backend:**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # venv\Scripts\activate on Windows
-   pip install -r requirements.txt
-   cp .env.example .env  # Add your keys here
-   uvicorn api:app --reload
-   ```
-
-3. **Setup Frontend:**
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
-
-## 🐳 Docker Deployment
-
-Run the entire stack with a single command:
 ```bash
 docker-compose up --build
 ```
 
+Open → http://localhost:8501
+
+## ☁️ Deploy to Streamlit Cloud (Free)
+
+1. Push to GitHub (make sure `.env` is in `.gitignore`)
+2. Go to https://share.streamlit.io
+3. Click **New app** → select your repo → set `unified_app.py` as main file
+4. Add secrets: `GROQ_API_KEY` and `GOOGLE_API_KEY` in the Secrets panel
+5. Click **Deploy** ✅
+
+## 🔑 Environment Variables
+
+```env
+GROQ_API_KEY=your_groq_key_here
+GOOGLE_API_KEY=your_google_key_here
+```
+
+Get keys:
+- Groq (free): https://console.groq.com
+- Google (free): https://aistudio.google.com
+
 ## 📄 License
-MIT License. Created by [Your Name].
+MIT

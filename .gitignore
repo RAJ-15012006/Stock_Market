@@ -1,8 +1,9 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
 venv/
+myenv/
 .env
 
 # Databases
@@ -12,7 +13,13 @@ venv/
 # Streamlit
 .streamlit/
 
+# Vector DB / RAG
+tmp/
+
 # Node/React
 node_modules/
 dist/
 .DS_Store
+
+# PDF (large file)
+*.pdf
