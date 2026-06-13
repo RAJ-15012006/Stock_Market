@@ -169,6 +169,43 @@ class PortfolioTool(Toolkit):
 
 portfolio_tool = PortfolioTool()
 
+# ── Custom Quant & RAG Tools for Agents ──────────────────────────────────────
+def query_stock_market_guide(query: str) -> str:
+    """Queries the local 150-page Stock Market Master Guide PDF for textbook/educational answers."""
+    try:
+        from rag_engine import rag_assistant
+        results = rag_assistant.query(query, k=3)
+        if not results:
+            return "No matching information found in the Guide."
+        response = []
+        for r in results:
+            response.append(f"Content: {r['text']}\nSource: {r['source']} (Page {r['page']})")
+        return "\n\n".join(response)
+    except Exception as e:
+        return f"Error querying guide: {e}"
+
+def get_ml_movement_prediction(symbol: str) -> str:
+    """Gets the machine learning movement prediction (XGBoost, SHAP factors, and HMM regimes) for a stock symbol."""
+    try:
+        import yfinance as yf
+        from ml_engine import train_prediction_model, detect_market_regimes
+        hist = yf.Ticker(symbol).history(period="1y")
+        if hist.empty:
+            return f"No stock data found for {symbol}."
+        res, err = train_prediction_model(hist)
+        if err:
+            return f"ML Prediction error: {err}"
+        
+        reg_df, reg_err = detect_market_regimes(hist)
+        regime = reg_df['Regime_Name'].iloc[-1] if reg_err is None else "Unknown"
+        
+        metrics = res["metrics"]
+        return f"Prediction: {metrics['pred_label']}\nProbability: {metrics['pred_prob']*100:.1f}%\n" \
+               f"Model Performance (XGBoost): Accuracy={metrics['accuracy']*100:.1f}%, F1={metrics['f1']*100:.1f}%\n" \
+               f"Market Regime (HMM): {regime}"
+    except Exception as e:
+        return f"Error running ML: {e}"
+
 # ── Agents ────────────────────────────────────────────────────────────────────
 _STRICT = [
     "Reply in MAX 5 bullet points.",
@@ -194,6 +231,7 @@ finance_agent = Agent(
         YFinanceTools(enable_stock_price=True, enable_analyst_recommendations=True,
                       enable_stock_fundamentals=True, enable_company_news=True),
         portfolio_tool,
+        get_ml_movement_prediction,
     ],
     instructions=_STRICT + ["Fetch data with tools. Show price, PE, recommendation, RSI in bullets."],
     db=storage, add_history_to_context=True, markdown=True,
@@ -216,11 +254,21 @@ agent_team = Agent(
         YFinanceTools(enable_stock_price=True, enable_analyst_recommendations=True,
                       enable_stock_fundamentals=True),
         DuckDuckGoTools(),
+        query_stock_market_guide,
+        get_ml_movement_prediction,
     ],
     model=Groq(id=MODEL),
     instructions=[
         "You are a financial AI. Answer the user question using tools.",
-        "MAX 5 bullet points. Each bullet = 1 short sentence.",
+        "When asked textbook financial questions or definitions, use query_stock_market_guide tool to cite sources/page numbers.",
+        "When asked to predict or forecast movements or evaluate machine learning, use get_ml_movement_prediction.",
+        "When giving stock buy/sell/hold recommendations, ALWAYS structure your response as:",
+        "  - Signal: [BUY / HOLD / SELL]",
+        "  - Confidence Score: [0-100%]",
+        "  - Expected Return: [Expected percentage return]",
+        "  - Risk Level: [Low / Moderate / High]",
+        "  - Reasoning: [Brief explanation using LLM + SHAP factors]",
+        "Otherwise, use MAX 5 bullet points where each bullet is 1 short sentence.",
         "NEVER show raw JSON. Summarize numbers in plain English.",
         "Call each tool ONCE. Do not loop.",
         "End every reply with: '⚠️ Educational only. Not financial advice.'",

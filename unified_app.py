@@ -2,11 +2,14 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
-from financial_agent import agent_team, run_debate, run_morning_brief, get_morning_briefs, PortfolioTool, set_model, MODEL as DEFAULT_MODEL
+import numpy as np
+from financial_agent import agent_team, run_debate, run_morning_brief, get_morning_briefs, PortfolioTool, set_model, run_agent_with_retry, MODEL as DEFAULT_MODEL
 from agno.models.groq import Groq
 import threading
 import json
 import os
+from ml_engine import train_prediction_model, get_shap_explanation, detect_market_regimes, run_strategy_backtest, RLOptimizerAgent, finbert_analyzer
+from rag_engine import rag_assistant
 
 # --- PAGE CONFIG ---
 st.set_page_config(
@@ -242,7 +245,7 @@ suggestions = [
 ]
 for i, (col, s) in enumerate(zip(sugg_cols, suggestions)):
     with col:
-        if st.button(s, key=f"sugg_{i}", use_container_width=True):
+        if st.button(s, key=f"sugg_{i}"):
             st.session_state.suggested_prompt = s
 
 st.markdown("<hr class='divider'>", unsafe_allow_html=True)
@@ -271,7 +274,7 @@ def get_currency(sym): return "\u20b9" if sym.endswith((".NS", ".BO")) else "$"
 with st.sidebar:
     _banner = os.path.join(os.path.dirname(__file__), "assets", "banner.png")
     if os.path.exists(_banner):
-        st.image(_banner, use_container_width=True)
+        st.image(_banner, width='stretch')
     st.header("📈 Market Pulse")
     
     st.markdown("---")
@@ -355,7 +358,7 @@ with st.sidebar:
                         pass
 
                 fig.update_layout(template="plotly_dark", height=280, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
                 # RSI
                 if len(hist) >= 14:
@@ -401,9 +404,10 @@ with st.sidebar:
     st.write("NVDA: 10 | AAPL: 5 | BTC: 0.5")
 
 # ── TABS ─────────────────────────────────────────────────────────────────────
-tab_chat, tab_candle, tab_market, tab_portfolio, tab_screener, tab_debate, tab_trading, tab_schedule = st.tabs([
-    "🤖 AI Chat", "🕯️ Candle Trading", "🌐 Market Data",
-    "💼 Portfolio", "🔍 AI Screener", "⚔️ Agent Debate", "📊 Auto Trading", "⏰ Scheduled Briefs"
+tab_chat, tab_candle, tab_backtest, tab_market, tab_portfolio, tab_screener, tab_debate, tab_trading, tab_schedule, tab_rag, tab_earnings, tab_rl = st.tabs([
+    "🤖 AI Chat", "🕯️ Candle Trading", "📊 Backtest & Regimes", "🌐 Market Data",
+    "💼 Portfolio", "🔍 AI Screener", "⚔️ Agent Debate", "📊 Auto Trading", "⏰ Scheduled Briefs",
+    "🧠 RAG Research", "🎙️ Earnings Analyzer", "🤖 RL Optimization"
 ])
 
 # ── TAB: CANDLE TRADING ──────────────────────────────────────────────────────
@@ -491,6 +495,76 @@ with tab_candle:
                     else:
                         st.info("🟡 HOLD — No strong signal right now")
 
+                # XGBoost ML Prediction & SHAP Explainability
+                try:
+                    with st.spinner("Calculating ML Forecast & SHAP values..."):
+                        ml_hist = yf.Ticker(ct_symbol).history(period="1y")
+                        ml_res, ml_err = train_prediction_model(ml_hist)
+                    
+                    if not ml_err and ml_res:
+                        metrics = ml_res["metrics"]
+                        prob = metrics["pred_prob"]
+                        label = metrics["pred_label"]
+                        
+                        st.markdown("### 🧠 Machine Learning Forecast & Explainable AI (XGBoost + SHAP)")
+                        
+                        mc1, mc2, mc3, mc4 = st.columns(4)
+                        with mc1:
+                            border_color = "00ff00" if label == "BUY/UP" else "ff0000"
+                            text_color = "#4ade80" if label == "BUY/UP" else "#f87171"
+                            st.markdown(f"""
+                            <div class="card" style="border: 1px solid #{border_color}44;">
+                                <div class="card-title">XGBoost Forecast</div>
+                                <div class="card-value" style="color:{text_color};">{label}</div>
+                                <div class="card-sub">Next 5 Trading Days</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        with mc2:
+                            st.markdown(f"""
+                            <div class="card">
+                                <div class="card-title">Buy Probability</div>
+                                <div class="card-value">{prob*100:.1f}%</div>
+                                <div class="card-sub">Model confidence score</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        with mc3:
+                            st.markdown(f"""
+                            <div class="card">
+                                <div class="card-title">Test Accuracy</div>
+                                <div class="card-value">{metrics['accuracy']*100:.1f}%</div>
+                                <div class="card-sub">Historical test accuracy</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        with mc4:
+                            st.markdown(f"""
+                            <div class="card">
+                                <div class="card-title">Model F1 Score</div>
+                                <div class="card-value">{metrics['f1']*100:.1f}%</div>
+                                <div class="card-sub">Harmonic mean of prec/rec</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                        # Show SHAP Plot
+                        shap_fig = get_shap_explanation(ml_res)
+                        if shap_fig:
+                            sh1, sh2 = st.columns([2, 1])
+                            with sh1:
+                                st.pyplot(shap_fig)
+                            with sh2:
+                                st.markdown("""
+                                **SHAP Feature Interpretation:**
+                                - **RSI/MACD**: Measures price momentum.
+                                - **Volatility/Return**: Evaluates risk and recent returns.
+                                - **Vol_Z**: Captures volume spikes indicating institutional interest.
+                                - **Sentiment**: Integrates real-time FinBERT scores.
+                                
+                                *Positive values shift the forecast towards BUY, while negative values shift it towards SELL/HOLD.*
+                                """)
+                    else:
+                        st.caption(f"ML forecasting offline for {ct_symbol}: {ml_err or 'No data'}")
+                except Exception as e:
+                    st.caption(f"Error computing ML prediction: {e}")
+
                 # ── Main chart (type-switched) ────────────────────────────────────
                 fig = go.Figure()
 
@@ -526,7 +600,7 @@ with tab_candle:
                     ha = df.copy()
                     ha["HA_Close"] = (df["Open"] + df["High"] + df["Low"] + df["Close"]) / 4
                     ha["HA_Open"]  = (df["Open"].shift(1) + df["Close"].shift(1)) / 2
-                    ha["HA_Open"].iloc[0] = df["Open"].iloc[0]
+                    ha.at[ha.index[0], "HA_Open"] = df["Open"].iloc[0]
                     ha["HA_High"]  = ha[["HA_Open", "HA_Close"]].join(df["High"]).max(axis=1)
                     ha["HA_Low"]   = ha[["HA_Open", "HA_Close"]].join(df["Low"]).min(axis=1)
                     fig.add_trace(go.Candlestick(
@@ -599,7 +673,7 @@ with tab_candle:
                     legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
                     xaxis=dict(gridcolor="#27272a"), yaxis=dict(gridcolor="#27272a"),
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
                 # ── Volume bars ───────────────────────────────────────────────
                 vol_colors = ["#4ade80" if c >= o else "#f87171"
@@ -612,7 +686,7 @@ with tab_candle:
                     margin=dict(l=0, r=0, t=0, b=0), showlegend=False,
                     xaxis=dict(gridcolor="#27272a"), yaxis=dict(gridcolor="#27272a"),
                 )
-                st.plotly_chart(fig_vol, use_container_width=True)
+                st.plotly_chart(fig_vol, width='stretch')
 
                 # ── RSI + MACD ────────────────────────────────────────────────
                 rsi_col, macd_col = st.columns(2)
@@ -632,7 +706,7 @@ with tab_candle:
                         yaxis=dict(range=[0, 100], gridcolor="#27272a"),
                         xaxis=dict(gridcolor="#27272a"),
                     )
-                    st.plotly_chart(fig_rsi, use_container_width=True)
+                    st.plotly_chart(fig_rsi, width='stretch')
 
                 with macd_col:
                     hist_colors = ["#4ade80" if v >= 0 else "#f87171" for v in df["MACDhist"]]
@@ -652,7 +726,7 @@ with tab_candle:
                         margin=dict(l=0, r=0, t=30, b=0),
                         xaxis=dict(gridcolor="#27272a"), yaxis=dict(gridcolor="#27272a"),
                     )
-                    st.plotly_chart(fig_macd, use_container_width=True)
+                    st.plotly_chart(fig_macd, width='stretch')
 
                 # ── Trade Panel + P&L ─────────────────────────────────────────
                 st.markdown("---")
@@ -713,6 +787,96 @@ with tab_candle:
 
         except Exception as e:
             st.error(f"Chart error: {e}")
+
+# ── TAB: BACKTEST & REGIMES ──────────────────────────────────────────────────
+with tab_backtest:
+    st.markdown("### 📊 Strategy Backtesting Arena & Market Regime HMM")
+    st.caption("Test quantitative trading strategies and identify active market states using Hidden Markov Models (HMM).")
+
+    bk_col1, bk_col2, bk_col3 = st.columns([2, 2, 1])
+    with bk_col1:
+        bk_symbol = st.text_input("Backtest Symbol", value="NVDA", key="bk_sym").upper().strip()
+    with bk_col2:
+        bk_strategy = st.selectbox("Trading Strategy", ["RSI", "MACD", "ML_Predictive"], key="bk_strategy")
+    with bk_col3:
+        bk_run = st.button("Run Backtest & HMM", key="bk_run_btn", type="primary")
+
+    if bk_symbol:
+        try:
+            bk_hist = yf.Ticker(bk_symbol).history(period="1y")
+            if bk_hist.empty:
+                st.warning(f"No historical data found for {bk_symbol}")
+            else:
+                # 1. Run Strategy Backtest
+                res_df, metrics = run_strategy_backtest(bk_hist, strategy=bk_strategy)
+                
+                st.markdown("#### 📈 Cumulative Returns vs Benchmark")
+                fig_cum = go.Figure()
+                fig_cum.add_trace(go.Scatter(x=res_df.index, y=res_df['Cum_Strategy'], name=f"Strategy ({bk_strategy})", line=dict(color="#00f2ff", width=2)))
+                fig_cum.add_trace(go.Scatter(x=res_df.index, y=res_df['Cum_Benchmark'], name="Benchmark (Buy & Hold)", line=dict(color="#71717a", width=1.5, dash="dot")))
+                fig_cum.update_layout(template="plotly_dark", height=320, paper_bgcolor="#09090b", plot_bgcolor="#09090b", margin=dict(l=0,r=0,t=10,b=0))
+                st.plotly_chart(fig_cum, width='stretch')
+
+                # Render metrics in columns
+                bkc1, bkc2, bkc3, bkc4, bkc5 = st.columns(5)
+                bkc1.metric("Strategy Total Return", f"{metrics['total_return_strat']:.1f}%")
+                bkc2.metric("Benchmark Return", f"{metrics['total_return_bench']:.1f}%")
+                bkc3.metric("Strategy Sharpe", f"{metrics['sharpe_strat']:.2f}")
+                bkc4.metric("Strategy Max DD", f"{metrics['max_dd_strat']:.1f}%")
+                bkc5.metric("Win Rate", f"{metrics['win_rate']:.1f}%")
+
+                st.markdown("---")
+
+                # 2. Market Regime Detection using HMM
+                st.markdown("#### ⏳ HMM Market Regime Detection")
+                st.caption("Unsupervised regime clustering (GaussianHMM) partitioning price history into Bull, Sideways/Volatile, and Bear states.")
+                
+                with st.spinner("Fitting HMM clustering..."):
+                    reg_df, hmm_err = detect_market_regimes(bk_hist)
+                
+                if hmm_err:
+                    st.info(f"HMM offline: {hmm_err}")
+                else:
+                    # Plotly Close price chart color-coded by regime
+                    fig_reg = go.Figure()
+                    
+                    colors_map = {0: "#f87171", 1: "#eab308", 2: "#4ade80"}  # Bear: red, Sideways: yellow, Bull: green
+                    regime_labels = {0: "Bear", 1: "Sideways/Volatile", 2: "Bull"}
+                    
+                    # Group consecutive regimes to avoid cluttered chart traces
+                    # Draw scatter line segments for each regime group
+                    for r_val in [0, 1, 2]:
+                        subset = reg_df.copy()
+                        # Mask out elements that are NOT of this regime to plot them separately
+                        subset.loc[subset['Regime'] != r_val, 'Close'] = np.nan
+                        fig_reg.add_trace(go.Scatter(
+                            x=subset.index, y=subset['Close'],
+                            name=regime_labels[r_val],
+                            line=dict(color=colors_map[r_val], width=2),
+                            connectgaps=False
+                        ))
+                    
+                    fig_reg.update_layout(
+                        template="plotly_dark", height=320,
+                        paper_bgcolor="#09090b", plot_bgcolor="#09090b",
+                        margin=dict(l=0,r=0,t=10,b=0),
+                        title=f"{bk_symbol} Price History Colored by HMM Regime",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0)
+                    )
+                    st.plotly_chart(fig_reg, width='stretch')
+
+                    # Print current regime summary
+                    cur_reg = reg_df['Regime_Name'].iloc[-1]
+                    cur_reg_val = reg_df['Regime'].iloc[-1]
+                    badge_color = "red" if cur_reg_val == 0 else "blue" if cur_reg_val == 1 else "green"
+                    st.markdown(f"**Current Market State:** <span class='badge-{badge_color}'>{cur_reg.upper()}</span>", unsafe_allow_html=True)
+                    
+                    # transition matrix summary
+                    st.markdown("""
+                    *State transitions are computed automatically on a rolling 1-year sequence of daily log returns and close-to-close volatility.*
+                    """)
+        except Exception as e:
+            st.error(f"Backtesting error: {e}")
 
 # ── TAB: MARKET DATA ────────────────────────────────────────────────────────
 with tab_market:
@@ -801,7 +965,7 @@ with tab_market:
             margin=dict(l=0, r=60, t=10, b=0),
             xaxis=dict(gridcolor="#27272a"), yaxis=dict(gridcolor="#27272a")
         )
-        st.plotly_chart(fig_sec, use_container_width=True)
+        st.plotly_chart(fig_sec, width='stretch')
 
     st.markdown("---")
 
@@ -831,7 +995,7 @@ with tab_market:
             })
         except: pass
     if tracker_rows:
-        st.dataframe(pd.DataFrame(tracker_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(tracker_rows), width='stretch', hide_index=True)
 
 # ── TAB: PORTFOLIO DASHBOARD ─────────────────────────────────────────────────
 with tab_portfolio:
@@ -885,7 +1049,7 @@ with tab_portfolio:
 
         with pc1:
             st.markdown("**📋 Holdings Table**")
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
 
             # Export CSV
             csv_data = pd.DataFrame(rows).to_csv(index=False)
@@ -914,7 +1078,7 @@ with tab_portfolio:
                     margin=dict(l=0, r=0, t=10, b=0),
                     showlegend=True
                 )
-                st.plotly_chart(fig_pie, use_container_width=True)
+                st.plotly_chart(fig_pie, width='stretch')
 
         st.markdown("---")
         st.markdown("**⚠️ Risk Meter**")
@@ -979,7 +1143,7 @@ with tab_screener:
                 elif rsi_filter == "Neutral (30-70)":  df_sc = df_sc[(df_sc["RSI"] >= 30) & (df_sc["RSI"] <= 70)]
                 if sort_by == "RSI":       df_sc = df_sc.sort_values("RSI")
                 elif sort_by == "Change %": df_sc = df_sc.sort_values("Change %", ascending=False)
-                st.dataframe(df_sc, use_container_width=True, hide_index=True)
+                st.dataframe(df_sc, width='stretch', hide_index=True)
                 st.download_button("⬇️ Export Screener CSV",
                                    df_sc.to_csv(index=False),
                                    file_name="screener.csv", mime="text/csv", key="dl_sc")
@@ -1153,4 +1317,185 @@ with tab_chat:
                     error_msg = f"⚠️ Error: {str(e)[:300]}"
                     st.error(error_msg)
                     st.session_state.messages.append({"role": "assistant", "content": error_msg})
+
+
+# ── TAB: RAG RESEARCH ────────────────────────────────────────────────────────
+with tab_rag:
+    st.markdown("### 🧠 Textbook Financial RAG Research Assistant")
+    st.caption("Perform semantic search over the local 150-page 'Stock Market Master Guide' PDF.")
+
+    rag_query = st.text_input("Ask any financial question (e.g., 'What is standard deviation?' or 'Explain RSI'):")
+    
+    # Suggestion buttons
+    sug_rag_cols = st.columns(3)
+    sug_queries = ["What is risk management?", "Explain Bollinger Bands", "What are stock market regimes?"]
+    for idx, sq in enumerate(sug_queries):
+        if sug_rag_cols[idx].button(sq, key=f"sug_rag_{idx}"):
+            rag_query = sq
+            
+    if rag_query:
+        with st.spinner("Retrieving document chunks & synthesizing response..."):
+            rag_results = rag_assistant.query(rag_query, k=3)
+            
+        if not rag_results:
+            st.info("No matching information found.")
+        else:
+            # We display retrieved chunks in tabs or expanders
+            st.markdown("#### 📖 Retrieved Guide Chunks")
+            for i, r in enumerate(rag_results):
+                with st.expander(f"Reference {i+1} — Page {r['page']} (Similarity: {r.get('score', 0):.2f})"):
+                    st.markdown(f"*{r['text']}*")
+            
+            # Now let the AI synthesize an answer using the retrieved context
+            st.markdown("#### 🤖 AI Synthesized Explanation")
+            with st.spinner("Lead Orchestrator synthesizing..."):
+                context_str = "\n\n".join([f"Context (Page {r['page']}): {r['text']}" for r in rag_results])
+                prompt = f"Question: {rag_query}\n\nContext from Guide:\n{context_str}\n\nProvide a textbook explanation answering the question based ONLY on the context provided, citing page numbers."
+                try:
+                    resp = run_agent_with_retry(agent_team, prompt)
+                    st.markdown(resp.content if resp and resp.content else "No response generated.")
+                except Exception as e:
+                    st.error(f"Synthesis error: {e}")
+
+
+# ── TAB: EARNINGS ANALYZER ──────────────────────────────────────────────────
+with tab_earnings:
+    st.markdown("### 🎙️ Earnings Call Sentiment Analyzer")
+    st.caption("Scrape recent news, reports and transcript summaries to analyze management tone, growth signals, and risks.")
+
+    ern_symbol = st.selectbox("Select Stock for Earnings Analysis:", ["NVDA", "AAPL", "RELIANCE.NS", "TCS.NS"], key="ern_sym")
+    ern_btn = st.button("Analyze Recent Earnings", key="ern_run_btn", type="primary")
+
+    if ern_symbol or ern_btn:
+        with st.spinner(f"Analyzing {ern_symbol} earnings signals..."):
+            # Use search agent to pull summaries
+            from financial_agent import run_agent_with_retry, web_search_agent
+            search_query = f"{ern_symbol} recent earnings call transcript summary growth highlights risk outlook"
+            resp = run_agent_with_retry(web_search_agent, search_query)
+            summary_content = resp.content if resp and resp.content else ""
+            
+        if not summary_content:
+            st.info("Could not fetch earnings summaries.")
+        else:
+            # Run FinBERT on each bullet/paragraph of the transcript summary
+            sentences = [s.strip() for s in summary_content.split("\n") if len(s.strip()) > 10]
+            
+            # Compile scores
+            positives, negatives, neutrals = [], [], []
+            sentiment_details = []
+            
+            for s in sentences[:8]: # limit to 8 for speed
+                pos, neg, neu = finbert_analyzer.analyze(s)
+                positives.append(pos)
+                negatives.append(neg)
+                neutrals.append(neu)
+                
+                label = "🟢 Positive" if pos > neg and pos > neu else "🔴 Negative" if neg > pos and neg > neu else "🟡 Neutral"
+                sentiment_details.append({"text": s, "sentiment": label, "pos": pos, "neg": neg, "neu": neu})
+                
+            avg_pos = np.mean(positives) if positives else 0.0
+            avg_neg = np.mean(negatives) if negatives else 0.0
+            avg_neu = np.mean(neutrals) if neutrals else 1.0
+            
+            # Bullish score out of 10
+            bullish_score = (avg_pos * 10) + (avg_neu * 2)
+            bullish_score = min(max(bullish_score, 0.5), 9.9)
+            
+            st.markdown("#### 🎯 FinBERT Sentiment & Tone Metrics")
+            ec1, ec2, ec3 = st.columns(3)
+            ec1.metric("Bullish Score", f"{bullish_score:.1f} / 10", "🟢 Bullish" if bullish_score > 6 else "🔴 Bearish" if bullish_score < 4 else "🟡 Neutral")
+            ec2.metric("Avg Positive Probability", f"{avg_pos*100:.1f}%")
+            ec3.metric("Avg Negative Probability", f"{avg_neg*100:.1f}%")
+            
+            # Print highlights
+            st.markdown("#### 📋 Segment-by-Segment Sentiment Analysis")
+            for sd in sentiment_details:
+                label_color = "green" if "Positive" in sd["sentiment"] else "red" if "Negative" in sd["sentiment"] else "blue"
+                st.markdown(f"""
+                <div class='card' style='padding:10px; margin-bottom:8px;'>
+                    <div style='display:flex; justify-content:space-between;'>
+                        <span style='font-size:0.9rem;'>{sd['text']}</span>
+                        <span class='badge-{label_color}'>{sd['sentiment'].upper()}</span>
+                    </div>
+                </div>""", unsafe_allow_html=True)
+
+
+# ── TAB: RL OPTIMIZATION ─────────────────────────────────────────────────────
+with tab_rl:
+    st.markdown("### 🤖 Reinforcement Learning Portfolio Optimizer")
+    st.caption("Train a Policy Gradient agent in real-time to optimize asset weights dynamically over historical data.")
+
+    rl_episodes = st.slider("RL Training Episodes", min_value=5, max_value=50, value=20, step=5)
+    rl_run = st.button("Train RL Portfolio Agent", key="rl_run_btn", type="primary")
+
+    # Load 1y daily prices for NVDA, AAPL, BTC-USD
+    @st.cache_data(ttl=600)
+    def load_rl_matrix():
+        tickers = ["NVDA", "AAPL", "BTC-USD"]
+        df_list = []
+        for t in tickers:
+            hist = yf.Ticker(t).history(period="1y")['Close']
+            df_list.append(hist)
+        merged = pd.concat(df_list, axis=1)
+        merged.columns = tickers
+        merged.ffill(inplace=True)
+        merged.dropna(inplace=True)
+        return merged
+
+    if rl_run:
+        price_matrix_df = load_rl_matrix()
+        if price_matrix_df.empty:
+            st.warning("Could not load asset price matrix.")
+        else:
+            st.markdown("#### ⏳ Running Reinforcement Learning (PG Policy) Training...")
+            progress_bar = st.progress(0.0)
+            
+            agent = RLOptimizerAgent(state_dim=6, action_dim=3)
+            price_matrix = price_matrix_df.values
+            
+            episodes_rewards = []
+            
+            # We run episode loop, updating Streamlit progress
+            for ep in range(rl_episodes):
+                rewards, weights = agent.train_on_history(price_matrix, episodes=1)
+                episodes_rewards.append(rewards[0])
+                progress_bar.progress((ep + 1) / rl_episodes)
+                
+            st.success("RL Portfolio Agent Training Completed!")
+            
+            # Plot training curve (Episode vs total reward)
+            fig_reward = go.Figure()
+            fig_reward.add_trace(go.Scatter(y=episodes_rewards, mode="lines+markers", name="Episode Cumulative Reward", line=dict(color="#a855f7", width=2)))
+            fig_reward.update_layout(
+                template="plotly_dark", height=240, paper_bgcolor="#09090b", plot_bgcolor="#09090b",
+                margin=dict(l=0,r=0,t=10,b=0), title="RL Training Rewards History (Policy Gradient)"
+            )
+            st.plotly_chart(fig_reward, width='stretch')
+            
+            # Compute portfolio cumulative returns using final RL weights vs Equal-weight
+            final_weights = agent.select_action( (price_matrix[1:] / price_matrix[:-1] - 1)[-2:].flatten() )
+            final_weights = final_weights / np.sum(final_weights) # normalize
+            
+            daily_returns = price_matrix_df.pct_change().dropna()
+            rl_daily_returns = (daily_returns * final_weights).sum(axis=1)
+            eq_daily_returns = daily_returns.mean(axis=1)
+            
+            cum_rl = (1 + rl_daily_returns).cumprod()
+            cum_eq = (1 + eq_daily_returns).cumprod()
+            
+            st.markdown("#### ⚖️ RL Portfolio Allocations vs Equal Weight")
+            fig_comp = go.Figure()
+            fig_comp.add_trace(go.Scatter(x=cum_rl.index, y=cum_rl, name="RL Optimized Weight", line=dict(color="#4ade80", width=2.5)))
+            fig_comp.add_trace(go.Scatter(x=cum_eq.index, y=cum_eq, name="Equal Weight Portfolio", line=dict(color="#71717a", width=1.5, dash="dot")))
+            fig_comp.update_layout(template="plotly_dark", height=280, paper_bgcolor="#09090b", plot_bgcolor="#09090b", margin=dict(l=0,r=0,t=10,b=0))
+            st.plotly_chart(fig_comp, width='stretch')
+            
+            # Allocation Display
+            aw1, aw2, aw3 = st.columns(3)
+            assets = ["NVDA", "AAPL", "BTC-USD"]
+            aw1.metric("NVDA Weight", f"{final_weights[0]*100:.1f}%")
+            aw2.metric("AAPL Weight", f"{final_weights[1]*100:.1f}%")
+            aw3.metric("BTC-USD Weight", f"{final_weights[2]*100:.1f}%")
+    else:
+        st.info("Click 'Train RL Portfolio Agent' to train policy gradient weights in real-time.")
 

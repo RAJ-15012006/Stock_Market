@@ -23,3 +23,7 @@ dist/
 
 # PDF (large file)
 *.pdf
+
+# Local RAG Cache
+rag_cache.json
+
