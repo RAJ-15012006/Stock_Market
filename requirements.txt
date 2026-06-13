@@ -12,3 +12,14 @@ pandas
 sqlalchemy
 fastapi
 uvicorn[standard]
+numpy>=1.20.0
+xgboost>=2.0.0
+lightgbm>=4.0.0
+shap>=0.40.0
+hmmlearn>=0.3.0
+transformers>=4.30.0
+torch>=2.0.0
+sentence-transformers>=2.2.0
+pdfplumber>=0.10.0
+scikit-learn>=1.2.0
+
