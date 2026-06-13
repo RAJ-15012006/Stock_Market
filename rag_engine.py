@@ -145,7 +145,7 @@ class RAGEngine:
         if self.embedder is not None and self.embeddings is not None:
             try:
                 query_emb = self.embedder.encode(query_text, convert_to_tensor=True)
-                cos_scores = util.cos_sim(query_emb, torch.tensor(self.embeddings))[0]
+                cos_scores = util.cos_sim(query_emb, torch.tensor(self.embeddings, dtype=torch.float32))[0]
                 top_results = torch.topk(cos_scores, k=min(k, len(self.chunks)))
                 
                 results = []
