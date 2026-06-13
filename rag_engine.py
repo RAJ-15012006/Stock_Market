@@ -24,8 +24,13 @@ class RAGEngine:
         self.chunks = []
         self.embeddings = None
         self.embedder = None
+        self._initialized = False
         
-        # Load embedding model if available
+    def init_model(self):
+        """Lazily loads the SentenceTransformer and builds the index when first queried."""
+        if self._initialized:
+            return
+            
         if SENTENCE_TRANSFORMERS_AVAILABLE:
             try:
                 # Use CPU-only and lightweight model
@@ -35,6 +40,7 @@ class RAGEngine:
                 self.embedder = None
                 
         self.load_or_build_index()
+        self._initialized = True
 
     def extract_pdf_chunks(self, path):
         """Extracts text page-by-page and splits it into chunks of ~600 characters."""
@@ -138,6 +144,7 @@ class RAGEngine:
 
     def query(self, query_text, k=4):
         """Performs search using semantic embeddings or word-match fallback."""
+        self.init_model()
         if not self.chunks:
             return []
 

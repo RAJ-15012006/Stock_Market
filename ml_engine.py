@@ -53,9 +53,11 @@ class FinBERTSentiment:
             "upgrade": 0.6, "downgrade": -0.6, "acquire": 0.3, "bankrupt": -0.9,
             "jump": 0.5, "drop": -0.5, "rally": 0.7, "slump": -0.7
         }
-        self.load_model()
+        self._initialized = False
 
     def load_model(self):
+        if self._initialized:
+            return
         if TRANSFORMERS_AVAILABLE:
             try:
                 # Load with a short timeout to prevent hanging UI
@@ -64,9 +66,11 @@ class FinBERTSentiment:
                 self.nlp = pipeline("text-classification", model=model, tokenizer=tokenizer)
             except Exception as e:
                 print(f"FinBERT load failed, using rule-based fallback: {e}")
+        self._initialized = True
 
     def analyze(self, text):
         """Returns positive, negative, neutral scores (sum to 1.0)"""
+        self.load_model()
         if not text or not isinstance(text, str):
             return 0.0, 0.0, 1.0
 
