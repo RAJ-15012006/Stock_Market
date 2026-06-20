@@ -1,6 +1,5 @@
 from agno.agent import Agent
 from agno.models.groq import Groq
-from agno.models.google import Gemini
 from agno.tools.yfinance import YFinanceTools
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.db.sqlite import SqliteDb
@@ -9,6 +8,13 @@ from dotenv import load_dotenv
 import yfinance as yf
 import json, os, sqlite3, time
 from datetime import datetime
+
+try:
+    from agno.models.google import Gemini
+    _GEMINI_AVAILABLE = True
+except ImportError:
+    _GEMINI_AVAILABLE = False
+    Gemini = None
 
 load_dotenv()
 
@@ -28,11 +34,13 @@ def run_agent_with_retry(agent, prompt, max_retries=4):
             err = str(e).lower()
             if "429" in err or "rate limit" in err:
                 # try gemini fallback
-                try:
-                    agent.model = Gemini(id="gemini-2.0-flash", api_key=os.getenv("GOOGLE_API_KEY"))
-                    return agent.run(prompt, stream=False)
-                except Exception:
-                    agent.model = Groq(id="llama-3.1-8b-instant")
+                if _GEMINI_AVAILABLE and os.getenv("GOOGLE_API_KEY"):
+                    try:
+                        agent.model = Gemini(id="gemini-2.0-flash", api_key=os.getenv("GOOGLE_API_KEY"))
+                        return agent.run(prompt, stream=False)
+                    except Exception:
+                        pass
+                agent.model = Groq(id="llama-3.1-8b-instant")
                 time.sleep(2 * (i + 1))
             else:
                 raise e
@@ -67,6 +75,8 @@ def set_model(model_id: str):
     global MODEL
     MODEL = model_id
     if "gemini" in MODEL.lower():
+        if not _GEMINI_AVAILABLE:
+            return "Gemini unavailable: google-genai not installed."
         new_model = Gemini(id=MODEL, api_key=os.getenv("GOOGLE_API_KEY"))
     else:
         new_model = Groq(id=MODEL)
