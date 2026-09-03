@@ -281,9 +281,9 @@ with st.sidebar:
     st.subheader("⚙️ Model Settings")
     
     model_options = {
-        "Llama 3.1 8B (Fast & Reliable)": "llama-3.1-8b-instant",
-        "Llama 3.3 70B (Powerful)": "llama-3.3-70b-versatile",
+        "Llama 3.3 70B (Powerful & Versatile)": "llama-3.3-70b-versatile",
         "Gemini 2.0 Flash (Advanced Backup)": "gemini-2.0-flash",
+        "Llama 3.1 8B (Fast)": "llama-3.1-8b-instant",
         "Qwen 2.5 Coder 7B (Local)": "qwen2.5-coder:7b",
         "DeepSeek R1 1.5B (Local)": "deepseek-r1:1.5b",
     }
@@ -295,7 +295,7 @@ with st.sidebar:
         set_model(selected_model_id)
         st.session_state.current_model_id = selected_model_id
         st.session_state.current_model_name = selected_model_name.split(" (")[0]
-        st.session_state.current_model_tier = "70B · Versatile" if "70B" in selected_model_name else "8B · Instant" if "8B" in selected_model_name else "SMoE · 32k"
+        st.session_state.current_model_tier = "70B · Versatile" if "70B" in selected_model_name else "Gemini · Flash" if "Gemini" in selected_model_name else "8B · Instant" if "8B" in selected_model_name else "SMoE · 32k"
         st.toast(f"Switched to {selected_model_name}")
 
     st.markdown("---")

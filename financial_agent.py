@@ -18,33 +18,70 @@ except ImportError:
 
 load_dotenv()
 
-MODEL = "llama-3.1-8b-instant"
+MODEL = "llama-3.3-70b-versatile"
 agent_storage = "agent_sessions.db"
 storage = SqliteDb(db_file=agent_storage, session_table="financial_assistant")
 
 
-def run_agent_with_retry(agent, prompt, max_retries=4):
-    """Run agent with Groq → Gemini fallback on rate limit."""
-    last_err = None
+def _is_error_response(resp) -> bool:
+    """Check if agent output is an API error JSON string instead of actual content."""
+    if not resp or not hasattr(resp, 'content') or not resp.content:
+        return False
+    content_str = str(resp.content).strip()
+    return content_str.startswith('{"error"') or '"invalid_request_error"' in content_str or '"model_not_found"' in content_str
+
+
+def run_agent_with_retry(agent, prompt, max_retries=3):
+    """Run agent with Groq → Gemini fallback on rate limits, invalid model, or API errors."""
+    original_model = agent.model
+    last_err_msg = ""
+
     for i in range(max_retries):
         try:
-            return agent.run(prompt, stream=False)
+            resp = agent.run(prompt, stream=False)
+            if resp and hasattr(resp, 'content') and resp.content and not _is_error_response(resp):
+                return resp
+            if _is_error_response(resp):
+                last_err_msg = str(resp.content)
         except Exception as e:
-            last_err = e
-            err = str(e).lower()
-            if "429" in err or "rate limit" in err:
-                # try gemini fallback
-                if _GEMINI_AVAILABLE and os.getenv("GOOGLE_API_KEY"):
-                    try:
-                        agent.model = Gemini(id="gemini-2.0-flash", api_key=os.getenv("GOOGLE_API_KEY"))
-                        return agent.run(prompt, stream=False)
-                    except Exception:
-                        pass
-                agent.model = Groq(id="llama-3.1-8b-instant")
-                time.sleep(2 * (i + 1))
-            else:
-                raise e
-    raise last_err
+            last_err_msg = str(e)
+
+        # Log fallback attempt
+        print(f"[Attempt {i+1}/{max_retries}] Agent execution failed: {last_err_msg[:100]}... Attempting fallback.")
+
+        # 1. Fall back to Gemini if API key is set
+        if _GEMINI_AVAILABLE and os.getenv("GOOGLE_API_KEY"):
+            try:
+                agent.model = Gemini(id="gemini-2.0-flash", api_key=os.getenv("GOOGLE_API_KEY"))
+                resp = agent.run(prompt, stream=False)
+                if resp and hasattr(resp, 'content') and resp.content and not _is_error_response(resp):
+                    return resp
+            except Exception as fb_err:
+                print(f"Gemini fallback failed: {fb_err}")
+
+        # 2. Fall back to alternative Groq models if API key is set
+        if os.getenv("GROQ_API_KEY"):
+            for alt_id in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-8b-8192"]:
+                try:
+                    agent.model = Groq(id=alt_id)
+                    resp = agent.run(prompt, stream=False)
+                    if resp and hasattr(resp, 'content') and resp.content and not _is_error_response(resp):
+                        return resp
+                except Exception as fb_err:
+                    print(f"Groq fallback ({alt_id}) failed: {fb_err}")
+
+        time.sleep(1.5 * (i + 1))
+
+    # Reset agent back to original model setting
+    agent.model = original_model
+
+    # Return a structured fallback response rather than breaking the application
+    class FallbackResponse:
+        def __init__(self, content):
+            self.content = content
+
+    clean_err = f"⚠️ **AI Model Error**: Could not complete query with active LLM provider.\n\n*Details:* `{last_err_msg[:250]}`\n\n*Tip: Try switching to **Llama 3.3 70B** or **Gemini 2.0 Flash** in the sidebar.*"
+    return FallbackResponse(clean_err)
 
 
 def delegate_to_finance_agent(task: str, symbol: str = "None") -> str:
@@ -74,16 +111,19 @@ def delegate_to_sentiment_agent(task: str, symbol: str = "None") -> str:
 def set_model(model_id: str):
     global MODEL
     MODEL = model_id
-    if "gemini" in MODEL.lower():
-        if not _GEMINI_AVAILABLE:
-            return "Gemini unavailable: google-genai not installed."
-        new_model = Gemini(id=MODEL, api_key=os.getenv("GOOGLE_API_KEY"))
-    else:
-        new_model = Groq(id=MODEL)
-    for ag in [web_search_agent, finance_agent, sentiment_agent,
-               agent_team, bull_agent, bear_agent, judge_agent]:
-        ag.model = new_model
-    return f"Model switched to {model_id}"
+    try:
+        if "gemini" in MODEL.lower():
+            if not _GEMINI_AVAILABLE:
+                return "Gemini unavailable: google-genai not installed."
+            new_model = Gemini(id=MODEL, api_key=os.getenv("GOOGLE_API_KEY"))
+        else:
+            new_model = Groq(id=MODEL)
+        for ag in [web_search_agent, finance_agent, sentiment_agent,
+                   agent_team, bull_agent, bear_agent, judge_agent]:
+            ag.model = new_model
+        return f"Model switched to {model_id}"
+    except Exception as e:
+        return f"Failed to switch model: {e}"
 
 
 # ── Portfolio Tool ────────────────────────────────────────────────────────────
