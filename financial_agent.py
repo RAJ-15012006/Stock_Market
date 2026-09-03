@@ -28,7 +28,14 @@ def _is_error_response(resp) -> bool:
     if not resp or not hasattr(resp, 'content') or not resp.content:
         return False
     content_str = str(resp.content).strip()
-    return content_str.startswith('{"error"') or '"invalid_request_error"' in content_str or '"model_not_found"' in content_str
+    return (
+        content_str.startswith('{"error"')
+        or '"error":' in content_str
+        or '"invalid_request_error"' in content_str
+        or '"model_not_found"' in content_str
+        or '"NOT_FOUND"' in content_str
+        or "no longer available" in content_str
+    )
 
 
 def run_agent_with_retry(agent, prompt, max_retries=3):
@@ -51,23 +58,30 @@ def run_agent_with_retry(agent, prompt, max_retries=3):
 
         # 1. Fall back to Gemini if API key is set
         if _GEMINI_AVAILABLE and os.getenv("GOOGLE_API_KEY"):
-            try:
-                agent.model = Gemini(id="gemini-2.0-flash", api_key=os.getenv("GOOGLE_API_KEY"))
-                resp = agent.run(prompt, stream=False)
-                if resp and hasattr(resp, 'content') and resp.content and not _is_error_response(resp):
-                    return resp
-            except Exception as fb_err:
-                print(f"Gemini fallback failed: {fb_err}")
+            for g_model_id in ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-1.5-pro"]:
+                try:
+                    agent.model = Gemini(id=g_model_id, api_key=os.getenv("GOOGLE_API_KEY"))
+                    resp = agent.run(prompt, stream=False)
+                    if resp and hasattr(resp, 'content') and resp.content and not _is_error_response(resp):
+                        return resp
+                    if _is_error_response(resp):
+                        last_err_msg = str(resp.content)
+                except Exception as fb_err:
+                    last_err_msg = str(fb_err)
+                    print(f"Gemini fallback ({g_model_id}) failed: {fb_err}")
 
         # 2. Fall back to alternative Groq models if API key is set
         if os.getenv("GROQ_API_KEY"):
-            for alt_id in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-8b-8192"]:
+            for alt_id in ["llama-3.3-70b-versatile", "llama3-8b-8192", "llama-3.1-8b-instant"]:
                 try:
                     agent.model = Groq(id=alt_id)
                     resp = agent.run(prompt, stream=False)
                     if resp and hasattr(resp, 'content') and resp.content and not _is_error_response(resp):
                         return resp
+                    if _is_error_response(resp):
+                        last_err_msg = str(resp.content)
                 except Exception as fb_err:
+                    last_err_msg = str(fb_err)
                     print(f"Groq fallback ({alt_id}) failed: {fb_err}")
 
         time.sleep(1.5 * (i + 1))
@@ -80,7 +94,11 @@ def run_agent_with_retry(agent, prompt, max_retries=3):
         def __init__(self, content):
             self.content = content
 
-    clean_err = f"⚠️ **AI Model Error**: Could not complete query with active LLM provider.\n\n*Details:* `{last_err_msg[:250]}`\n\n*Tip: Try switching to **Llama 3.3 70B** or **Gemini 2.0 Flash** in the sidebar.*"
+    clean_err = (
+        f"⚠️ **AI Model Error**: Could not complete query with active LLM provider.\n\n"
+        f"*Details:* `{last_err_msg[:250]}`\n\n"
+        f"💡 *Tip: Ensure your `GROQ_API_KEY` or `GOOGLE_API_KEY` is added to your Streamlit App Secrets panel.*"
+    )
     return FallbackResponse(clean_err)
 
 

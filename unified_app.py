@@ -282,7 +282,7 @@ with st.sidebar:
     
     model_options = {
         "Llama 3.3 70B (Powerful & Versatile)": "llama-3.3-70b-versatile",
-        "Gemini 2.0 Flash (Advanced Backup)": "gemini-2.0-flash",
+        "Gemini 1.5 Flash (Backup)": "gemini-1.5-flash",
         "Llama 3.1 8B (Fast)": "llama-3.1-8b-instant",
         "Qwen 2.5 Coder 7B (Local)": "qwen2.5-coder:7b",
         "DeepSeek R1 1.5B (Local)": "deepseek-r1:1.5b",
