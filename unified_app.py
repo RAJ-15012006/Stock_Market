@@ -1,4 +1,15 @@
 import streamlit as st
+import os
+
+# Sync Streamlit Cloud secrets to environment variables
+if hasattr(st, "secrets"):
+    try:
+        for k in st.secrets:
+            if k not in os.environ:
+                os.environ[k] = str(st.secrets[k])
+    except Exception:
+        pass
+
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go

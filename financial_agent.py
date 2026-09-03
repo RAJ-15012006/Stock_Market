@@ -18,6 +18,16 @@ except ImportError:
 
 load_dotenv()
 
+# Automatically sync Streamlit Cloud Secrets into environment variables if available
+try:
+    import streamlit as st
+    if hasattr(st, "secrets"):
+        for k in st.secrets:
+            if k not in os.environ:
+                os.environ[k] = str(st.secrets[k])
+except Exception:
+    pass
+
 MODEL = "llama-3.3-70b-versatile"
 agent_storage = "agent_sessions.db"
 storage = SqliteDb(db_file=agent_storage, session_table="financial_assistant")
