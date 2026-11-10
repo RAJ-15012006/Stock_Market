@@ -29,7 +29,46 @@ except ImportError:
     _GEMINI_AVAILABLE = False
     Gemini = None
 
-MODEL = "llama-3.3-70b-versatile"
+def _detect_best_groq_model() -> tuple[str, list[str]]:
+    """Detect active text models on Groq for this API key dynamically."""
+    fallback_candidates = [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.8-27b",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "allam-2-7b",
+    ]
+    try:
+        from groq import Groq as GroqClient
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            return fallback_candidates[0], fallback_candidates
+        client = GroqClient(api_key=api_key)
+        all_ids = [m.id for m in client.models.list().data if getattr(m, "active", True)]
+        chat_ids = [
+            m for m in all_ids 
+            if not any(x in m for x in ["whisper", "prompt-guard", "orpheus", "safeguard", "vision"])
+        ]
+        ordered = [m for m in fallback_candidates if m in chat_ids]
+        for m in chat_ids:
+            if m not in ordered:
+                ordered.append(m)
+        if ordered:
+            return ordered[0], ordered
+    except Exception as e:
+        print(f"Groq model discovery notice: {e}")
+    return fallback_candidates[0], fallback_candidates
+
+_PRIMARY_MODEL, _GROQ_FALLBACK_MODELS = _detect_best_groq_model()
+MODEL = _PRIMARY_MODEL
+
+# ── Valid Gemini model IDs for fallback ────────────────────────────────────────
+_GEMINI_FALLBACK_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+]
 agent_storage = "agent_sessions.db"
 storage = SqliteDb(db_file=agent_storage, session_table="financial_assistant")
 
@@ -72,12 +111,26 @@ def _is_error_response(resp) -> bool:
         or '"model_not_found"' in content_str
         or '"NOT_FOUND"' in content_str
         or "no longer available" in content_str
+        or "does not exist" in content_str
+        or "do not have access" in content_str
+    )
+
+
+def _is_model_not_found_error(err_str: str) -> bool:
+    """Returns True if the error string indicates an invalid/unavailable model."""
+    return (
+        "model_not_found" in err_str
+        or "does not exist" in err_str
+        or "do not have access to it" in err_str
+        or "model not found" in err_str.lower()
+        or "no longer available" in err_str
     )
 
 
 def run_agent_with_retry(agent, prompt, max_retries=3):
     """Run agent with Groq → Gemini fallback on rate limits, invalid model, or API errors.
-    Always normalises resp.content to a plain string before returning."""
+    Always normalises resp.content to a plain string before returning.
+    Skips invalid/unavailable models immediately without wasting retries."""
     original_model = agent.model
     last_err_msg = ""
 
@@ -90,45 +143,59 @@ def run_agent_with_retry(agent, prompt, max_retries=3):
                 return resp
             if _is_error_response(resp):
                 last_err_msg = extracted
+                # If the primary model is invalid, don't retry it — go straight to fallback
+                if _is_model_not_found_error(last_err_msg):
+                    break
         except Exception as e:
             last_err_msg = str(e)
+            # If primary model is simply not found, skip retrying it immediately
+            if _is_model_not_found_error(last_err_msg):
+                break
 
         # Log fallback attempt
-        print(f"[Attempt {i+1}/{max_retries}] Agent execution failed: {last_err_msg[:100]}... Attempting fallback.")
+        print(f"[Attempt {i+1}/{max_retries}] Agent execution failed: {last_err_msg[:120]}... Trying fallback.")
+        time.sleep(1.0 * (i + 1))
 
-        # 1. Fall back to Gemini if API key is set
-        if _GEMINI_AVAILABLE and os.getenv("GOOGLE_API_KEY"):
-            for g_model_id in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]:
-                try:
-                    agent.model = Gemini(id=g_model_id, api_key=os.getenv("GOOGLE_API_KEY"))
-                    resp = agent.run(prompt, stream=False)
-                    extracted = _extract_content(resp)
-                    if resp and extracted and not _is_error_response(resp):
-                        resp.content = extracted
-                        return resp
-                    if _is_error_response(resp):
-                        last_err_msg = extracted
-                except Exception as fb_err:
-                    last_err_msg = str(fb_err)
-                    print(f"Gemini fallback ({g_model_id}) failed: {fb_err}")
+    # ── Fallback 1: Try Gemini models ──────────────────────────────────────────
+    if _GEMINI_AVAILABLE and os.getenv("GOOGLE_API_KEY"):
+        for g_model_id in _GEMINI_FALLBACK_MODELS:
+            try:
+                agent.model = Gemini(id=g_model_id, api_key=os.getenv("GOOGLE_API_KEY"))
+                resp = agent.run(prompt, stream=False)
+                extracted = _extract_content(resp)
+                if resp and extracted and not _is_error_response(resp):
+                    resp.content = extracted
+                    print(f"[Fallback] Succeeded with Gemini model: {g_model_id}")
+                    return resp
+                if _is_error_response(resp):
+                    last_err_msg = extracted
+                    if _is_model_not_found_error(last_err_msg):
+                        continue  # try next Gemini model
+            except Exception as fb_err:
+                last_err_msg = str(fb_err)
+                print(f"Gemini fallback ({g_model_id}) failed: {fb_err}")
 
-        # 2. Fall back to alternative Groq models if API key is set
-        if os.getenv("GROQ_API_KEY"):
-            for alt_id in ["llama-3.3-70b-versatile", "llama3-8b-8192", "llama-3.1-8b-instant"]:
-                try:
-                    agent.model = Groq(id=alt_id)
-                    resp = agent.run(prompt, stream=False)
-                    extracted = _extract_content(resp)
-                    if resp and extracted and not _is_error_response(resp):
-                        resp.content = extracted
-                        return resp
-                    if _is_error_response(resp):
-                        last_err_msg = extracted
-                except Exception as fb_err:
-                    last_err_msg = str(fb_err)
-                    print(f"Groq fallback ({alt_id}) failed: {fb_err}")
-
-        time.sleep(1.5 * (i + 1))
+    # ── Fallback 2: Try alternative Groq models ────────────────────────────────
+    if os.getenv("GROQ_API_KEY"):
+        for alt_id in _GROQ_FALLBACK_MODELS:
+            try:
+                agent.model = Groq(id=alt_id, api_key=os.getenv("GROQ_API_KEY", ""))
+                resp = agent.run(prompt, stream=False)
+                extracted = _extract_content(resp)
+                if resp and extracted and not _is_error_response(resp):
+                    resp.content = extracted
+                    print(f"[Fallback] Succeeded with Groq model: {alt_id}")
+                    return resp
+                if _is_error_response(resp):
+                    last_err_msg = extracted
+                    if _is_model_not_found_error(last_err_msg):
+                        continue  # skip this bad model, try next
+            except Exception as fb_err:
+                last_err_msg = str(fb_err)
+                if _is_model_not_found_error(last_err_msg):
+                    print(f"Skipping invalid Groq model '{alt_id}': {fb_err}")
+                    continue
+                print(f"Groq fallback ({alt_id}) failed: {fb_err}")
 
     # Reset agent back to original model setting
     agent.model = original_model
@@ -139,9 +206,9 @@ def run_agent_with_retry(agent, prompt, max_retries=3):
             self.content = content
 
     clean_err = (
-        f"⚠️ **AI Model Error**: Could not complete query with active LLM provider.\n\n"
-        f"*Details:* `{last_err_msg[:250]}`\n\n"
-        f"💡 *Tip: Ensure your `GROQ_API_KEY` or `GOOGLE_API_KEY` is set in your `.env` file.*"
+        f"⚠️ **AI Model Error**: Could not complete query with any available LLM provider.\n\n"
+        f"*Details:* `{last_err_msg[:300]}`\n\n"
+        f"💡 *Tip: Check your `GROQ_API_KEY` and `GOOGLE_API_KEY` in Streamlit Secrets or `.env` file.*"
     )
     return FallbackResponse(clean_err)
 

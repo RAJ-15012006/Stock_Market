@@ -14,7 +14,11 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import numpy as np
-from financial_agent import agent_team, run_debate, run_morning_brief, get_morning_briefs, PortfolioTool, set_model, run_agent_with_retry, MODEL as DEFAULT_MODEL
+from financial_agent import (
+    agent_team, run_debate, run_morning_brief, get_morning_briefs,
+    PortfolioTool, set_model, run_agent_with_retry, MODEL as DEFAULT_MODEL,
+    _GROQ_FALLBACK_MODELS
+)
 from agno.models.groq import Groq
 import threading
 import json
@@ -291,13 +295,14 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("⚙️ Model Settings")
     
-    model_options = {
-        "Llama 3.3 70B (Powerful & Versatile)": "llama-3.3-70b-versatile",
-        "Gemini 1.5 Flash (Backup)": "gemini-1.5-flash",
-        "Llama 3.1 8B (Fast)": "llama-3.1-8b-instant",
-        "Qwen 2.5 Coder 7B (Local)": "qwen2.5-coder:7b",
-        "DeepSeek R1 1.5B (Local)": "deepseek-r1:1.5b",
-    }
+    model_options = {}
+    for gm in _GROQ_FALLBACK_MODELS:
+        clean_name = gm.split("/")[-1].replace("-", " ").title()
+        model_options[f"Groq: {clean_name}"] = gm
+    
+    # Add Gemini options
+    model_options["Gemini 2.5 Flash"] = "gemini-2.5-flash"
+    model_options["Gemini 1.5 Flash"] = "gemini-1.5-flash"
     
     selected_model_name = st.selectbox("Select Agent Model", list(model_options.keys()), index=0)
     selected_model_id = model_options[selected_model_name]
