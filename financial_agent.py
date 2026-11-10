@@ -9,13 +9,7 @@ import yfinance as yf
 import json, os, sqlite3, time
 from datetime import datetime
 
-try:
-    from agno.models.google import Gemini
-    _GEMINI_AVAILABLE = True
-except ImportError:
-    _GEMINI_AVAILABLE = False
-    Gemini = None
-
+# Load .env FIRST so API keys are available before anything else
 load_dotenv()
 
 # Automatically sync Streamlit Cloud Secrets into environment variables if available
@@ -28,16 +22,49 @@ try:
 except Exception:
     pass
 
+try:
+    from agno.models.google import Gemini
+    _GEMINI_AVAILABLE = True
+except ImportError:
+    _GEMINI_AVAILABLE = False
+    Gemini = None
+
 MODEL = "llama-3.3-70b-versatile"
 agent_storage = "agent_sessions.db"
 storage = SqliteDb(db_file=agent_storage, session_table="financial_assistant")
+
+
+def _extract_content(resp) -> str:
+    """Safely extract text content from an agno RunResponse.
+    In newer agno versions resp.content may be a list of TextContent objects
+    or a plain string. This handles both cases."""
+    if resp is None:
+        return ""
+    # Plain string (older agno / FallbackResponse)
+    if isinstance(resp.content, str):
+        return resp.content
+    # List of content blocks (newer agno)
+    if isinstance(resp.content, list):
+        parts = []
+        for block in resp.content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif hasattr(block, "text"):
+                parts.append(block.text)
+            elif hasattr(block, "content"):
+                parts.append(str(block.content))
+            else:
+                parts.append(str(block))
+        return "\n".join(parts).strip()
+    # Fallback: coerce to string
+    return str(resp.content) if resp.content else ""
 
 
 def _is_error_response(resp) -> bool:
     """Check if agent output is an API error JSON string instead of actual content."""
     if not resp or not hasattr(resp, 'content') or not resp.content:
         return False
-    content_str = str(resp.content).strip()
+    content_str = _extract_content(resp).strip()
     return (
         content_str.startswith('{"error"')
         or '"error":' in content_str
@@ -49,17 +76,20 @@ def _is_error_response(resp) -> bool:
 
 
 def run_agent_with_retry(agent, prompt, max_retries=3):
-    """Run agent with Groq → Gemini fallback on rate limits, invalid model, or API errors."""
+    """Run agent with Groq → Gemini fallback on rate limits, invalid model, or API errors.
+    Always normalises resp.content to a plain string before returning."""
     original_model = agent.model
     last_err_msg = ""
 
     for i in range(max_retries):
         try:
             resp = agent.run(prompt, stream=False)
-            if resp and hasattr(resp, 'content') and resp.content and not _is_error_response(resp):
+            extracted = _extract_content(resp)
+            if resp and extracted and not _is_error_response(resp):
+                resp.content = extracted  # normalise to string
                 return resp
             if _is_error_response(resp):
-                last_err_msg = str(resp.content)
+                last_err_msg = extracted
         except Exception as e:
             last_err_msg = str(e)
 
@@ -68,14 +98,16 @@ def run_agent_with_retry(agent, prompt, max_retries=3):
 
         # 1. Fall back to Gemini if API key is set
         if _GEMINI_AVAILABLE and os.getenv("GOOGLE_API_KEY"):
-            for g_model_id in ["gemini-1.5-flash", "gemini-2.5-flash", "gemini-1.5-pro"]:
+            for g_model_id in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]:
                 try:
                     agent.model = Gemini(id=g_model_id, api_key=os.getenv("GOOGLE_API_KEY"))
                     resp = agent.run(prompt, stream=False)
-                    if resp and hasattr(resp, 'content') and resp.content and not _is_error_response(resp):
+                    extracted = _extract_content(resp)
+                    if resp and extracted and not _is_error_response(resp):
+                        resp.content = extracted
                         return resp
                     if _is_error_response(resp):
-                        last_err_msg = str(resp.content)
+                        last_err_msg = extracted
                 except Exception as fb_err:
                     last_err_msg = str(fb_err)
                     print(f"Gemini fallback ({g_model_id}) failed: {fb_err}")
@@ -86,10 +118,12 @@ def run_agent_with_retry(agent, prompt, max_retries=3):
                 try:
                     agent.model = Groq(id=alt_id)
                     resp = agent.run(prompt, stream=False)
-                    if resp and hasattr(resp, 'content') and resp.content and not _is_error_response(resp):
+                    extracted = _extract_content(resp)
+                    if resp and extracted and not _is_error_response(resp):
+                        resp.content = extracted
                         return resp
                     if _is_error_response(resp):
-                        last_err_msg = str(resp.content)
+                        last_err_msg = extracted
                 except Exception as fb_err:
                     last_err_msg = str(fb_err)
                     print(f"Groq fallback ({alt_id}) failed: {fb_err}")
@@ -107,7 +141,7 @@ def run_agent_with_retry(agent, prompt, max_retries=3):
     clean_err = (
         f"⚠️ **AI Model Error**: Could not complete query with active LLM provider.\n\n"
         f"*Details:* `{last_err_msg[:250]}`\n\n"
-        f"💡 *Tip: Ensure your `GROQ_API_KEY` or `GOOGLE_API_KEY` is added to your Streamlit App Secrets panel.*"
+        f"💡 *Tip: Ensure your `GROQ_API_KEY` or `GOOGLE_API_KEY` is set in your `.env` file.*"
     )
     return FallbackResponse(clean_err)
 
@@ -115,7 +149,7 @@ def run_agent_with_retry(agent, prompt, max_retries=3):
 def delegate_to_finance_agent(task: str, symbol: str = "None") -> str:
     """Get financial data, price, fundamentals for a stock symbol."""
     try:
-        return run_agent_with_retry(finance_agent, f"Task: {task}. Symbol: {symbol}").content
+        return _extract_content(run_agent_with_retry(finance_agent, f"Task: {task}. Symbol: {symbol}"))
     except Exception as e:
         return f"Finance error: {str(e)}"
 
@@ -123,7 +157,7 @@ def delegate_to_finance_agent(task: str, symbol: str = "None") -> str:
 def delegate_to_web_search_agent(task: str, symbol: str = "None") -> str:
     """Search latest news and market updates for a topic or symbol."""
     try:
-        return run_agent_with_retry(web_search_agent, f"Task: {task}. Symbol: {symbol}").content
+        return _extract_content(run_agent_with_retry(web_search_agent, f"Task: {task}. Symbol: {symbol}"))
     except Exception as e:
         return f"Search error: {str(e)}"
 
@@ -131,7 +165,7 @@ def delegate_to_web_search_agent(task: str, symbol: str = "None") -> str:
 def delegate_to_sentiment_agent(task: str, symbol: str = "None") -> str:
     """Get market sentiment score and mood for a symbol."""
     try:
-        return run_agent_with_retry(sentiment_agent, f"Task: {task}. Symbol: {symbol}").content
+        return _extract_content(run_agent_with_retry(sentiment_agent, f"Task: {task}. Symbol: {symbol}"))
     except Exception as e:
         return f"Sentiment error: {str(e)}"
 
@@ -145,7 +179,7 @@ def set_model(model_id: str):
                 return "Gemini unavailable: google-genai not installed."
             new_model = Gemini(id=MODEL, api_key=os.getenv("GOOGLE_API_KEY"))
         else:
-            new_model = Groq(id=MODEL)
+            new_model = Groq(id=MODEL, api_key=os.getenv("GROQ_API_KEY", ""))
         for ag in [web_search_agent, finance_agent, sentiment_agent,
                    agent_team, bull_agent, bear_agent, judge_agent]:
             ag.model = new_model
@@ -292,10 +326,14 @@ _STRICT = [
     "Use tools once. Do not repeat tool calls.",
 ]
 
+# Helper: build a Groq model instance with explicit API key
+def _groq(model_id: str = MODEL):
+    return Groq(id=model_id, api_key=os.getenv("GROQ_API_KEY", ""))
+
 web_search_agent = Agent(
     name="Web Search Agent",
     role="Real-time market news",
-    model=Groq(id=MODEL),
+    model=_groq(),
     tools=[DuckDuckGoTools()],
     instructions=_STRICT + ["Search once. Return top 3 news bullets only."],
     db=storage, add_history_to_context=True, markdown=True,
@@ -304,7 +342,7 @@ web_search_agent = Agent(
 finance_agent = Agent(
     name="Finance Agent",
     role="Stock data and portfolio analysis",
-    model=Groq(id=MODEL),
+    model=_groq(),
     tools=[
         YFinanceTools(enable_stock_price=True, enable_analyst_recommendations=True,
                       enable_stock_fundamentals=True, enable_company_news=True),
@@ -318,7 +356,7 @@ finance_agent = Agent(
 sentiment_agent = Agent(
     name="Sentiment Agent",
     role="Market mood",
-    model=Groq(id=MODEL),
+    model=_groq(),
     instructions=["Reply with: Score: X/10 | Mood: WORD | Reason: one sentence. Nothing else."],
     db=storage, add_history_to_context=True, markdown=True,
 )
@@ -335,7 +373,7 @@ agent_team = Agent(
         query_stock_market_guide,
         get_ml_movement_prediction,
     ],
-    model=Groq(id=MODEL),
+    model=_groq(),
     instructions=[
         "You are a financial AI. Answer the user question using tools.",
         "When asked textbook financial questions or definitions, use query_stock_market_guide tool to cite sources/page numbers.",
@@ -356,21 +394,21 @@ agent_team = Agent(
 
 bull_agent = Agent(
     name="Bull Agent", role="Optimistic analyst",
-    model=Groq(id=MODEL), tools=[],
+    model=_groq(), tools=[],
     instructions=["Argue BUY in exactly 4 bullets. Max 120 words total. No tools."],
     markdown=True,
 )
 
 bear_agent = Agent(
     name="Bear Agent", role="Pessimistic analyst",
-    model=Groq(id=MODEL), tools=[],
+    model=_groq(), tools=[],
     instructions=["Argue SELL in exactly 4 bullets. Max 120 words total. No tools."],
     markdown=True,
 )
 
 judge_agent = Agent(
     name="Judge Agent", role="Neutral arbitrator",
-    model=Groq(id=MODEL), tools=[],
+    model=_groq(), tools=[],
     instructions=["Verdict: BUY/HOLD/SELL with confidence %. Then 2 sentences of reasoning. No tools."],
     markdown=True,
 )

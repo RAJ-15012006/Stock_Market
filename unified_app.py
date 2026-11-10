@@ -1316,9 +1316,9 @@ with tab_chat:
         with st.chat_message("assistant"):
             with st.spinner("Agents thinking..."):
                 try:
-                    from financial_agent import run_agent_with_retry
+                    from financial_agent import run_agent_with_retry, _extract_content
                     resp = run_agent_with_retry(agent_team, prompt)
-                    full_response = resp.content if resp and resp.content else ""
+                    full_response = resp.content if resp and isinstance(resp.content, str) else _extract_content(resp)
                     if full_response:
                         st.markdown(full_response)
                         st.session_state.messages.append({"role": "assistant", "content": full_response})
@@ -1364,7 +1364,9 @@ with tab_rag:
                 prompt = f"Question: {rag_query}\n\nContext from Guide:\n{context_str}\n\nProvide a textbook explanation answering the question based ONLY on the context provided, citing page numbers."
                 try:
                     resp = run_agent_with_retry(agent_team, prompt)
-                    st.markdown(resp.content if resp and resp.content else "No response generated.")
+                    from financial_agent import _extract_content
+                    content = resp.content if resp and isinstance(resp.content, str) else _extract_content(resp)
+                    st.markdown(content if content else "No response generated.")
                 except Exception as e:
                     st.error(f"Synthesis error: {e}")
 
