@@ -207,7 +207,10 @@ def train_prediction_model(df, prediction_days=5, threshold=0.02):
             max_depth=3,
             learning_rate=0.08,
             random_state=42,
-            eval_metric="logloss"
+            eval_metric="logloss",
+            n_jobs=1,
+            tree_method="hist",
+            device="cpu"
         )
         model.fit(X_train, y_train)
 
@@ -535,7 +538,16 @@ def run_strategy_backtest(df, strategy="RSI"):
             positions = [0] * 30 # initial startup
             for t in range(30, len(df_ml)):
                 train_slice = df_ml.iloc[t-30:t]
-                model = XGBClassifier(n_estimators=10, max_depth=2, learning_rate=0.1, eval_metric="logloss", random_state=42)
+                model = XGBClassifier(
+                    n_estimators=10,
+                    max_depth=2,
+                    learning_rate=0.1,
+                    eval_metric="logloss",
+                    random_state=42,
+                    n_jobs=1,
+                    tree_method="hist",
+                    device="cpu"
+                )
                 model.fit(train_slice[features], train_slice['Target'])
                 
                 pred = model.predict(df_ml[features].iloc[t:t+1])[0]

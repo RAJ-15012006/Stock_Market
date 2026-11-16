@@ -27,3 +27,15 @@ dist/
 # Local RAG Cache
 rag_cache.json
 
+# Backups
+*.backup
+*.morse-backup
+*.pre-*
+
+# Virtual env
+.venv/
+
+# SQLite WAL files
+*.db-shm
+*.db-wal
+

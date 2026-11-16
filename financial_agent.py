@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 import yfinance as yf
 import json, os, sqlite3, time
 from datetime import datetime
+import functools
+
 
 # Load .env FIRST so API keys are available before anything else
 load_dotenv()
@@ -22,12 +24,235 @@ try:
 except Exception:
     pass
 
+
+# Morse observability initialization
+try:
+    import morse_ai
+    morse_ai.init()
+    MORSE_ENABLED = True
+    print("[Morse] SDK initialized")
+except Exception as e:
+    morse_ai = None
+    MORSE_ENABLED = False
+    print(f"[Morse] Observability unavailable: {e}")
+
 try:
     from agno.models.google import Gemini
     _GEMINI_AVAILABLE = True
 except ImportError:
     _GEMINI_AVAILABLE = False
     Gemini = None
+
+
+
+
+
+
+
+def _install_morse_groq_instrumentation():
+    """Capture Groq model usage and calculate cost in Morse."""
+
+    if not MORSE_ENABLED:
+        return
+
+    original_invoke = Groq.invoke
+
+    if getattr(original_invoke, "_morse_instrumented", False):
+        return
+
+    @functools.wraps(original_invoke)
+    def morse_instrumented_invoke(self, *args, **kwargs):
+        model_id = getattr(self, "id", "unknown")
+
+        try:
+            with morse_ai.span(
+                f"Groq LLM Request: {model_id}",
+                span_type="llm",
+                input_data={
+                    "provider": "Groq",
+                    "model": model_id,
+                },
+            ) as span:
+
+                response = original_invoke(self, *args, **kwargs)
+                usage = getattr(response, "response_usage", None)
+
+                if usage is not None:
+                    span_data = getattr(span, "_span", None)
+
+                    if span_data is not None:
+                        input_tokens = getattr(
+                            usage, "input_tokens", None
+                        )
+                        output_tokens = getattr(
+                            usage, "output_tokens", None
+                        )
+                        total_tokens = getattr(
+                            usage, "total_tokens", None
+                        )
+                        reasoning_tokens = getattr(
+                            usage, "reasoning_tokens", None
+                        )
+
+                        span_data.model = model_id
+                        span_data.input_tokens = input_tokens
+                        span_data.output_tokens = output_tokens
+                        span_data.total_tokens = total_tokens
+                        span_data.reasoning_tokens = reasoning_tokens
+
+                        # Groq published on-demand pricing (USD per 1M tokens).
+                        pricing = {
+                            "openai/gpt-oss-120b": {
+                                "input": 0.15,
+                                "cached_input": 0.075,
+                                "output": 0.60,
+                            },
+                            "openai/gpt-oss-20b": {
+                                "input": 0.075,
+                                "cached_input": 0.037,
+                                "output": 0.30,
+                            },
+                        }
+
+                        rates = pricing.get(model_id)
+
+                        cached_tokens = (
+                            getattr(usage, "cache_read_tokens", 0) or 0
+                        )
+
+                        if (
+                            rates is not None
+                            and input_tokens is not None
+                            and output_tokens is not None
+                        ):
+                            cached_tokens = min(
+                                cached_tokens, input_tokens
+                            )
+                            regular_input = input_tokens - cached_tokens
+
+                            cost_usd = (
+                                regular_input * rates["input"]
+                                + cached_tokens * rates["cached_input"]
+                                + output_tokens * rates["output"]
+                            ) / 1_000_000
+
+                            span_data.cost_usd = cost_usd
+
+                            print(
+                                f"[Morse] {model_id} | "
+                                f"Input: {input_tokens} | "
+                                f"Output: {output_tokens} | "
+                                f"Cost: ${cost_usd:.10f}"
+                            )
+                        else:
+                            print(
+                                f"[Morse] Usage captured for {model_id}; "
+                                "cost unavailable for this model or usage."
+                            )
+
+                return response
+
+        except Exception as exc:
+            print(f"[Morse] Model instrumentation error: {exc}")
+            raise
+
+    morse_instrumented_invoke._morse_instrumented = True
+    Groq.invoke = morse_instrumented_invoke
+
+    print("[Morse] Groq native usage and cost instrumentation installed")
+
+
+_install_morse_groq_instrumentation()
+
+
+def _install_morse_gemini_instrumentation():
+    """Capture Gemini model usage in Morse native LLM span fields."""
+
+    if not MORSE_ENABLED or not _GEMINI_AVAILABLE:
+        return
+
+    original_invoke = Gemini.invoke
+
+    if getattr(original_invoke, "_morse_instrumented", False):
+        return
+
+    @functools.wraps(original_invoke)
+    def morse_instrumented_invoke(self, *args, **kwargs):
+        model_id = getattr(self, "id", "unknown")
+
+        try:
+            with morse_ai.span(
+                f"Gemini LLM Request: {model_id}",
+                span_type="llm",
+                input_data={
+                    "provider": "Google Gemini",
+                    "model": model_id,
+                },
+            ) as span:
+
+                response = original_invoke(self, *args, **kwargs)
+                usage = getattr(response, "response_usage", None)
+
+                if usage is not None:
+                    span_data = getattr(span, "_span", None)
+
+                    if span_data is not None:
+                        input_tokens = getattr(
+                            usage, "input_tokens", None
+                        )
+                        output_tokens = getattr(
+                            usage, "output_tokens", None
+                        )
+                        total_tokens = getattr(
+                            usage, "total_tokens", None
+                        )
+
+                        span_data.model = model_id
+                        span_data.input_tokens = input_tokens
+                        span_data.output_tokens = output_tokens
+                        span_data.total_tokens = total_tokens
+                        span_data.reasoning_tokens = getattr(
+                            usage, "reasoning_tokens", None
+                        )
+
+                        # Do not invent Gemini pricing.
+                        provider_cost = getattr(usage, "cost", None)
+
+                        if provider_cost is not None:
+                            span_data.cost_usd = provider_cost
+
+                        print(
+                            f"[Morse] Gemini {model_id} | "
+                            f"Input: {input_tokens} | "
+                            f"Output: {output_tokens} | "
+                            f"Total: {total_tokens}"
+                        )
+
+                return response
+
+        except Exception as exc:
+            print(f"[Morse] Gemini instrumentation error: {exc}")
+            raise
+
+    morse_instrumented_invoke._morse_instrumented = True
+    Gemini.invoke = morse_instrumented_invoke
+
+    print("[Morse] Gemini native usage instrumentation installed")
+
+
+_install_morse_gemini_instrumentation()
+
+
+
+
+
+
+
+
+
+
+
+
 
 def _detect_best_groq_model() -> tuple[str, list[str]]:
     """Detect active text models on Groq for this API key dynamically."""
@@ -65,9 +290,8 @@ MODEL = _PRIMARY_MODEL
 
 # ── Valid Gemini model IDs for fallback ────────────────────────────────────────
 _GEMINI_FALLBACK_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
 ]
 agent_storage = "agent_sessions.db"
 storage = SqliteDb(db_file=agent_storage, session_table="financial_assistant")
@@ -127,91 +351,297 @@ def _is_model_not_found_error(err_str: str) -> bool:
     )
 
 
-def run_agent_with_retry(agent, prompt, max_retries=3):
-    """Run agent with Groq → Gemini fallback on rate limits, invalid model, or API errors.
-    Always normalises resp.content to a plain string before returning.
-    Skips invalid/unavailable models immediately without wasting retries."""
+
+def _run_agent_with_retry_untraced(agent, prompt, max_retries=3):
+    """
+    Run an Agno agent with:
+    1. Original Groq model
+    2. Gemini fallback
+    3. Alternative Groq models
+
+    Preserves the original model after execution.
+    Captures provider-level telemetry through Morse instrumentation.
+    """
+
     original_model = agent.model
     last_err_msg = ""
 
-    for i in range(max_retries):
-        try:
-            resp = agent.run(prompt, stream=False)
-            extracted = _extract_content(resp)
-            if resp and extracted and not _is_error_response(resp):
-                resp.content = extracted  # normalise to string
-                return resp
-            if _is_error_response(resp):
-                last_err_msg = extracted
-                # If the primary model is invalid, don't retry it — go straight to fallback
-                if _is_model_not_found_error(last_err_msg):
-                    break
-        except Exception as e:
-            last_err_msg = str(e)
-            # If primary model is simply not found, skip retrying it immediately
-            if _is_model_not_found_error(last_err_msg):
+    def classify_error(message):
+        """Classify common LLM provider errors."""
+
+        msg = str(message).lower()
+
+        if any(term in msg for term in [
+            "model_not_found",
+            "model not found",
+            "no longer available",
+            "does not exist",
+            "not_found",
+            "do not have access",
+        ]):
+            return "model_not_found"
+
+        if any(term in msg for term in [
+            "429",
+            "rate_limit",
+            "resource_exhausted",
+            "too many requests",
+        ]):
+            return "rate_limit"
+
+        if any(term in msg for term in [
+            "503",
+            "502",
+            "504",
+            "unavailable",
+            "service unavailable",
+        ]):
+            return "provider_unavailable"
+
+        if any(term in msg for term in [
+            "401",
+            "403",
+            "unauthorized",
+            "permission_denied",
+            "invalid api key",
+        ]):
+            return "authentication"
+
+        return "other"
+
+    try:
+
+        # =====================================================
+        # PRIMARY PROVIDER: ORIGINAL GROQ MODEL
+        # =====================================================
+
+        for i in range(max_retries):
+
+            try:
+                resp = agent.run(prompt, stream=False)
+                extracted = _extract_content(resp)
+
+                if resp and extracted and not _is_error_response(resp):
+                    resp.content = extracted
+                    return resp
+
+                last_err_msg = extracted or "Empty primary model response."
+                error_type = classify_error(last_err_msg)
+
+            except Exception as exc:
+                last_err_msg = str(exc)
+                error_type = classify_error(last_err_msg)
+
+            print(
+                f"[Primary] Attempt {i + 1}/{max_retries} failed "
+                f"({error_type}): {last_err_msg[:180]}"
+            )
+
+            # Invalid model, provider outage or invalid credentials:
+            # stop retrying the same primary model.
+            if error_type in (
+                "model_not_found",
+                "provider_unavailable",
+                "authentication",
+            ):
                 break
 
-        # Log fallback attempt
-        print(f"[Attempt {i+1}/{max_retries}] Agent execution failed: {last_err_msg[:120]}... Trying fallback.")
-        time.sleep(1.0 * (i + 1))
+            # Controlled retry for rate limits and other errors.
+            if i < max_retries - 1:
+                time.sleep(min(2 ** i, 8))
 
-    # ── Fallback 1: Try Gemini models ──────────────────────────────────────────
-    if _GEMINI_AVAILABLE and os.getenv("GOOGLE_API_KEY"):
-        for g_model_id in _GEMINI_FALLBACK_MODELS:
-            try:
-                agent.model = Gemini(id=g_model_id, api_key=os.getenv("GOOGLE_API_KEY"))
-                resp = agent.run(prompt, stream=False)
-                extracted = _extract_content(resp)
-                if resp and extracted and not _is_error_response(resp):
-                    resp.content = extracted
-                    print(f"[Fallback] Succeeded with Gemini model: {g_model_id}")
-                    return resp
-                if _is_error_response(resp):
-                    last_err_msg = extracted
-                    if _is_model_not_found_error(last_err_msg):
-                        continue  # try next Gemini model
-            except Exception as fb_err:
-                last_err_msg = str(fb_err)
-                print(f"Gemini fallback ({g_model_id}) failed: {fb_err}")
+        # =====================================================
+        # FALLBACK 1: GOOGLE GEMINI
+        # =====================================================
 
-    # ── Fallback 2: Try alternative Groq models ────────────────────────────────
-    if os.getenv("GROQ_API_KEY"):
-        for alt_id in _GROQ_FALLBACK_MODELS:
-            try:
-                agent.model = Groq(id=alt_id, api_key=os.getenv("GROQ_API_KEY", ""))
-                resp = agent.run(prompt, stream=False)
-                extracted = _extract_content(resp)
-                if resp and extracted and not _is_error_response(resp):
-                    resp.content = extracted
-                    print(f"[Fallback] Succeeded with Groq model: {alt_id}")
-                    return resp
-                if _is_error_response(resp):
-                    last_err_msg = extracted
-                    if _is_model_not_found_error(last_err_msg):
-                        continue  # skip this bad model, try next
-            except Exception as fb_err:
-                last_err_msg = str(fb_err)
-                if _is_model_not_found_error(last_err_msg):
-                    print(f"Skipping invalid Groq model '{alt_id}': {fb_err}")
+        if _GEMINI_AVAILABLE and os.getenv("GOOGLE_API_KEY"):
+
+            for g_model_id in _GEMINI_FALLBACK_MODELS:
+
+                try:
+                    agent.model = Gemini(
+                        id=g_model_id,
+                        api_key=os.getenv("GOOGLE_API_KEY"),
+                    )
+
+                    resp = agent.run(prompt, stream=False)
+                    extracted = _extract_content(resp)
+
+                    if resp and extracted and not _is_error_response(resp):
+                        resp.content = extracted
+
+                        print(
+                            f"[Fallback] Gemini succeeded: {g_model_id}"
+                        )
+
+                        return resp
+
+                    last_err_msg = extracted or "Empty Gemini response."
+                    error_type = classify_error(last_err_msg)
+
+                except Exception as exc:
+                    last_err_msg = str(exc)
+                    error_type = classify_error(last_err_msg)
+
+                print(
+                    f"[Fallback] Gemini {g_model_id} failed "
+                    f"({error_type}): {last_err_msg[:180]}"
+                )
+
+                # Try another Gemini model only for an unavailable model ID.
+                if error_type == "model_not_found":
                     continue
-                print(f"Groq fallback ({alt_id}) failed: {fb_err}")
 
-    # Reset agent back to original model setting
-    agent.model = original_model
+                # Provider-wide errors: stop cycling through Gemini models.
+                if error_type in (
+                    "provider_unavailable",
+                    "rate_limit",
+                    "authentication",
+                ):
+                    break
 
-    # Return a structured fallback response rather than breaking the application
-    class FallbackResponse:
-        def __init__(self, content):
-            self.content = content
+        # =====================================================
+        # FALLBACK 2: ALTERNATIVE GROQ MODELS
+        # =====================================================
 
-    clean_err = (
-        f"⚠️ **AI Model Error**: Could not complete query with any available LLM provider.\n\n"
-        f"*Details:* `{last_err_msg[:300]}`\n\n"
-        f"💡 *Tip: Check your `GROQ_API_KEY` and `GOOGLE_API_KEY` in Streamlit Secrets or `.env` file.*"
-    )
-    return FallbackResponse(clean_err)
+        if os.getenv("GROQ_API_KEY"):
 
+            original_model_id = getattr(original_model, "id", None)
+
+            for alt_id in _GROQ_FALLBACK_MODELS:
+
+                # Do not execute the same model twice.
+                if alt_id == original_model_id:
+                    continue
+
+                try:
+                    agent.model = Groq(
+                        id=alt_id,
+                        api_key=os.getenv("GROQ_API_KEY", ""),
+                    )
+
+                    resp = agent.run(prompt, stream=False)
+                    extracted = _extract_content(resp)
+
+                    if resp and extracted and not _is_error_response(resp):
+                        resp.content = extracted
+
+                        print(
+                            f"[Fallback] Alternative Groq succeeded: {alt_id}"
+                        )
+
+                        return resp
+
+                    last_err_msg = extracted or "Empty Groq response."
+                    error_type = classify_error(last_err_msg)
+
+                except Exception as exc:
+                    last_err_msg = str(exc)
+                    error_type = classify_error(last_err_msg)
+
+                print(
+                    f"[Fallback] Groq {alt_id} failed "
+                    f"({error_type}): {last_err_msg[:180]}"
+                )
+
+                if error_type == "model_not_found":
+                    continue
+
+                if error_type in (
+                    "provider_unavailable",
+                    "rate_limit",
+                    "authentication",
+                ):
+                    break
+
+        # =====================================================
+        # ALL PROVIDERS FAILED
+        # =====================================================
+
+        class FallbackResponse:
+            def __init__(self, content):
+                self.content = content
+
+        return FallbackResponse(
+            "⚠️ **AI Model Error**: Could not complete the query "
+            "with any available LLM provider.\n\n"
+            f"*Details:* `{last_err_msg[:300]}`\n\n"
+            "💡 *Tip: Check your GROQ_API_KEY and GOOGLE_API_KEY "
+            "in Streamlit Secrets or your .env file.*"
+        )
+
+    finally:
+        # Always restore the originally configured agent model.
+        agent.model = original_model
+
+
+def run_agent_with_retry(agent, prompt, max_retries=3):
+    """
+    Execute an agent with Morse observability.
+
+    - Inside an existing trace: create a child agent span.
+    - Outside a trace: create a standalone agent trace.
+    - Preserve existing retry and fallback behavior.
+    """
+    agent_name = getattr(agent, "name", None) or "Unknown Agent"
+
+    def execute():
+        return _run_agent_with_retry_untraced(
+            agent, prompt, max_retries=max_retries
+        )
+
+    def is_successful(response):
+        content = _extract_content(response)
+        return (
+            bool(content.strip())
+            and not content.lstrip().startswith(
+                "⚠️ **AI Model Error**"
+            )
+        )
+
+    # Morse disabled: preserve original execution.
+    if morse_ai is None:
+        return execute()
+
+    from morse_ai.tracing import get_active_trace
+
+    active_trace = get_active_trace()
+
+    # CASE 1: Already inside the Lead Orchestrator trace.
+    if active_trace is not None:
+        with morse_ai.span(
+            agent_name,
+            span_type="agent",
+            input_data={
+                "agent": agent_name,
+                "prompt": str(prompt)[:1000],
+            },
+        ) as span:
+            response = execute()
+            success = is_successful(response)
+
+            span.set_metadata("agent_name", agent_name)
+            span.set_metadata("success", success)
+            span.set_output({
+                "response_preview": _extract_content(response)[:2000]
+            })
+
+            if not success:
+                span.mark_failed("Agent returned an error response")
+
+            return response
+
+    # CASE 2: No active trace. Create a standalone trace.
+    with morse_ai.run(agent_name) as trace:
+        response = execute()
+        success = is_successful(response)
+
+        trace.set_outcome(
+            success=success,
+            outcome="completed" if success else "model_error",
+        )
+
+        return response
 
 def delegate_to_finance_agent(task: str, symbol: str = "None") -> str:
     """Get financial data, price, fundamentals for a stock symbol."""
