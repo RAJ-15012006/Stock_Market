@@ -833,7 +833,7 @@ web_search_agent = Agent(
     model=_groq(),
     tools=[DuckDuckGoTools()],
     instructions=_STRICT + ["Search once. Return top 3 news bullets only."],
-    db=storage, add_history_to_context=True, markdown=True,
+    db=storage, add_history_to_context=False, markdown=True,
 )
 
 finance_agent = Agent(
