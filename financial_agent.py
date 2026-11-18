@@ -365,6 +365,7 @@ def _run_agent_with_retry_untraced(agent, prompt, max_retries=3):
 
     original_model = agent.model
     last_err_msg = ""
+    primary_rate_limited = False
 
     def classify_error(message):
         """Classify common LLM provider errors."""
@@ -439,11 +440,15 @@ def _run_agent_with_retry_untraced(agent, prompt, max_retries=3):
 
             # Invalid model, provider outage or invalid credentials:
             # stop retrying the same primary model.
-            if error_type in (
+            if error_type == "rate_limit":
+                primary_rate_limited = True
+                break
+
+            if error_type in (        
                 "model_not_found",
                 "provider_unavailable",
                 "authentication",
-            ):
+               ):
                 break
 
             # Controlled retry for rate limits and other errors.
@@ -504,8 +509,8 @@ def _run_agent_with_retry_untraced(agent, prompt, max_retries=3):
         # FALLBACK 2: ALTERNATIVE GROQ MODELS
         # =====================================================
 
-        if os.getenv("GROQ_API_KEY"):
-
+        if os.getenv("GROQ_API_KEY") and not primary_rate_limited:
+            
             original_model_id = getattr(original_model, "id", None)
 
             for alt_id in _GROQ_FALLBACK_MODELS:
