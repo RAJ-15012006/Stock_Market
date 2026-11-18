@@ -272,7 +272,7 @@ def _detect_best_groq_model() -> tuple[str, list[str]]:
         client = GroqClient(api_key=api_key)
         all_ids = [m.id for m in client.models.list().data if getattr(m, "active", True)]
         chat_ids = [
-            m for m in all_ids 
+            m for m in all_ids
             if not any(x in m for x in ["whisper", "prompt-guard", "orpheus", "safeguard", "vision"])
         ]
         ordered = [m for m in fallback_candidates if m in chat_ids]
@@ -321,6 +321,31 @@ def _extract_content(resp) -> str:
         return "\n".join(parts).strip()
     # Fallback: coerce to string
     return str(resp.content) if resp.content else ""
+
+
+
+def _is_valid_agent_response(resp) -> bool:
+    """Accept only completed Agno runs with non-empty, non-error content."""
+
+    if resp is None:
+        return False
+
+    content = _extract_content(resp).strip()
+
+    if not content:
+        return False
+
+    # Custom fallback responses do not have an Agno status.
+    if not hasattr(resp, "status"):
+        return not content.startswith("⚠️ **AI Model Error**")
+
+    status = getattr(resp.status, "value", resp.status)
+
+    if str(status).upper() != "COMPLETED":
+        return False
+
+    return not _is_error_response(resp)
+
 
 
 def _is_error_response(resp) -> bool:
@@ -494,16 +519,11 @@ def _run_agent_with_retry_untraced(agent, prompt, max_retries=3):
                 )
 
                 # Try another Gemini model only for an unavailable model ID.
-                if error_type == "model_not_found":
-                    continue
-
-                # Provider-wide errors: stop cycling through Gemini models.
-                if error_type in (
-                    "provider_unavailable",
-                    "rate_limit",
-                    "authentication",
-                ):
+                if error_type == "authentication":
                     break
+
+                continue
+
 
         # =====================================================
         # FALLBACK 2: ALTERNATIVE GROQ MODELS
@@ -549,16 +569,10 @@ def _run_agent_with_retry_untraced(agent, prompt, max_retries=3):
                     f"({error_type}): {last_err_msg[:180]}"
                 )
 
-                if error_type == "model_not_found":
-                    continue
-
-                if error_type in (
-                    "provider_unavailable",
-                    "rate_limit",
-                    "authentication",
-                ):
+                if error_type == "authentication":
                     break
 
+                continue
         # =====================================================
         # ALL PROVIDERS FAILED
         # =====================================================
@@ -596,13 +610,8 @@ def run_agent_with_retry(agent, prompt, max_retries=3):
         )
 
     def is_successful(response):
-        content = _extract_content(response)
-        return (
-            bool(content.strip())
-            and not content.lstrip().startswith(
-                "⚠️ **AI Model Error**"
-            )
-        )
+
+      return _is_valid_agent_response(response)
 
     # Morse disabled: preserve original execution.
     if morse_ai is None:
@@ -636,10 +645,18 @@ def run_agent_with_retry(agent, prompt, max_retries=3):
 
             return response
 
-    # CASE 2: No active trace. Create a standalone trace.
+        # CASE 2: No active trace. Create a standalone trace.
     with morse_ai.run(agent_name) as trace:
         response = execute()
         success = is_successful(response)
+        response_content = _extract_content(response)
+
+        trace.set_output({
+            "response": response_content,
+            "response_present": bool(response_content.strip()),
+            "response_length": len(response_content),
+            "success": success,
+        })
 
         trace.set_outcome(
             success=success,
@@ -809,10 +826,10 @@ def get_ml_movement_prediction(symbol: str) -> str:
         res, err = train_prediction_model(hist)
         if err:
             return f"ML Prediction error: {err}"
-        
+
         reg_df, reg_err = detect_market_regimes(hist)
         regime = reg_df['Regime_Name'].iloc[-1] if reg_err is None else "Unknown"
-        
+
         metrics = res["metrics"]
         return f"Prediction: {metrics['pred_label']}\nProbability: {metrics['pred_prob']*100:.1f}%\n" \
                f"Model Performance (XGBoost): Accuracy={metrics['accuracy']*100:.1f}%, F1={metrics['f1']*100:.1f}%\n" \
@@ -916,15 +933,58 @@ judge_agent = Agent(
 )
 
 
+
 def run_debate(topic: str) -> dict:
     try:
-        bull_content = run_agent_with_retry(bull_agent, f"Topic: {topic}").content or "No argument."
-        bear_content = run_agent_with_retry(bear_agent, f"Topic: {topic}").content or "No argument."
-        verdict = run_agent_with_retry(judge_agent,
-                                       f"Bull:\n{bull_content}\n\nBear:\n{bear_content}").content or "No verdict."
-        return {"bull": bull_content, "bear": bear_content, "verdict": verdict}
+        # Step 1: Bull analysis
+        bull_response = run_agent_with_retry(
+            bull_agent, f"Topic: {topic}"
+        )
+        bull_content = _extract_content(bull_response).strip()
+
+        if not bull_content or bull_content.startswith("⚠️ **AI Model Error**"):
+            return {
+                "bull": bull_content or "Bull analysis unavailable.",
+                "bear": "Not run because Bull analysis failed.",
+                "verdict": "Debate aborted: Bull analysis failed. No verdict generated."
+            }
+
+        # Step 2: Bear analysis
+        bear_response = run_agent_with_retry(
+            bear_agent, f"Topic: {topic}"
+        )
+        bear_content = _extract_content(bear_response).strip()
+
+        if not bear_content or bear_content.startswith("⚠️ **AI Model Error**"):
+            return {
+                "bull": bull_content,
+                "bear": bear_content or "Bear analysis unavailable.",
+                "verdict": "Debate aborted: Bear analysis failed. No verdict generated."
+            }
+
+        # Step 3: Judge only receives two valid analyses
+        judge_response = run_agent_with_retry(
+            judge_agent,
+            f"Bull:\n{bull_content}\n\nBear:\n{bear_content}"
+        )
+        verdict = _extract_content(judge_response).strip()
+
+        if not verdict or verdict.startswith("⚠️ **AI Model Error**"):
+            verdict = "No verdict generated: Judge Agent failed."
+
+        return {
+            "bull": bull_content,
+            "bear": bear_content,
+            "verdict": verdict
+        }
+
     except Exception as e:
-        return {"bull": f"Error: {e}", "bear": f"Error: {e}", "verdict": f"Debate failed: {e}"}
+        return {
+            "bull": f"Error: {e}",
+            "bear": f"Error: {e}",
+            "verdict": f"Debate failed: {e}"
+        }
+
 
 
 def run_morning_brief() -> str:
