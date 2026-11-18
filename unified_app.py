@@ -1384,7 +1384,8 @@ with tab_earnings:
     ern_symbol = st.selectbox("Select Stock for Earnings Analysis:", ["NVDA", "AAPL", "RELIANCE.NS", "TCS.NS"], key="ern_sym")
     ern_btn = st.button("Analyze Recent Earnings", key="ern_run_btn", type="primary")
 
-    if ern_symbol or ern_btn:
+    if ern_btn:
+        
         with st.spinner(f"Analyzing {ern_symbol} earnings signals..."):
             # Use search agent to pull summaries
             from financial_agent import run_agent_with_retry, web_search_agent
